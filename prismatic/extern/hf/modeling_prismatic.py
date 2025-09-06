@@ -719,6 +719,7 @@ class PrismaticForConditionalGeneration(PrismaticPreTrainedModel):
 
 class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
     config_class: PretrainedConfig = OpenVLAConfig
+    _supports_sdpa: bool = False
 
     def __init__(self, config: OpenVLAConfig) -> None:
         super().__init__(config)
