@@ -19,6 +19,12 @@ import tqdm
 from accelerate import PartialState
 from huggingface_hub import HfApi, snapshot_download
 from peft import LoraConfig, PeftModel, get_peft_model
+# HN-LoRA imports - support multiple versions
+HN_LORA_AVAILABLE = False
+HN_LORA_VERSION = None
+get_hn_lora_model = None
+HNLoRAConfig = None
+
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import MultiStepLR
@@ -28,6 +34,8 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import wandb
 
+import sys
+sys.path.append('/homes/80/kang/openvla-oft')
 from experiments.robot.openvla_utils import (
     check_model_logic_mismatch,
     model_is_on_hf_hub,
@@ -63,6 +71,19 @@ from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+
+import os
+# os.environ ["WANDB_API_KEY"] = "41f4ee88a220359a48d63a1a4239c83862288bb0"
+os.environ ["WANDB_MODE"] = "online"
+# os.environ["WANDB_BASE_URL"] = "https://api.wandb-cn.top"
+os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
+os.environ["WANDB_INSECURE_DISABLE_SSL"] = "True"
+
+import wandb
+
+
+
 
 
 @dataclass
@@ -109,6 +130,16 @@ class FinetuneConfig:
     merge_lora_during_training: bool = True          # If True, merges LoRA weights and saves result during training
                                                      #   Note: Merging can be very slow on some machines. If so, set to
                                                      #         False and merge final checkpoint offline!
+    
+    # HN-LoRA (HyperNetwork LoRA)
+    use_hn_lora: bool = False                        # If True, uses HN-LoRA instead of standard LoRA
+    hn_lora_version: str = "v8"                      # Version of HN-LoRA to use (v8, v9_optimized, v10_extreme)
+    hn_context_dim: int = 128                        # Dimension of task context embedding
+    hn_encoder_type: str = "transformer"             # Type of encoder for context ('transformer' or 'lstm')
+    hn_encoder_layers: int = 2                       # Number of encoder layers
+    hn_encoder_heads: int = 4                        # Number of attention heads (for transformer encoder)
+    hn_mlp_dim: int = 256                           # Hidden dimension for MLP layers
+    hn_embedding_dropout: float = 0.1                # Dropout for embeddings
 
     # Logging
     wandb_entity: str = "your-wandb-entity"          # Name of WandB entity
@@ -198,6 +229,51 @@ def load_checkpoint(module_name: str, path: str, step: int, device: str = "cpu")
     return remove_ddp_in_checkpoint(state_dict)
 
 
+def load_hn_lora_checkpoint(vla, path: str, step: int, device: str = "cpu") -> None:
+    """
+    Loads a HN-LoRA checkpoint and applies it to the VLA model.
+
+    Args:
+        vla: The VLA model with HN-LoRA already initialized.
+        path (str): Path to checkpoint directory.
+        step (int): Gradient step number of saved checkpoint.
+        device (str): String specifying how to remap storage locations (default = "cpu").
+
+    Returns:
+        None.
+    """
+    import json
+    from pathlib import Path
+    
+    checkpoint_dir = Path(path)
+    if step > 0:
+        # For resuming from a specific step
+        hn_lora_dir = checkpoint_dir / f"openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r8+dropout-0.0--image_aug--hn_lora_v8_grouped_heads_gpu7--{step}_chkpt" / "hn_lora_hypernet"
+    else:
+        # For loading a final checkpoint
+        hn_lora_dir = checkpoint_dir / "hn_lora_hypernet"
+    
+    if not hn_lora_dir.exists():
+        print(f"Warning: HN-LoRA checkpoint directory not found at {hn_lora_dir}")
+        return
+    
+    # Load HyperNetwork state dict
+    hypernet_state_path = hn_lora_dir / "hypernet_state.pt"
+    if hypernet_state_path.exists():
+        print(f"Loading HN-LoRA HyperNetwork from: {hypernet_state_path}")
+        state_dict = torch.load(hypernet_state_path, weights_only=True, map_location=device)
+        
+        # Access the HyperNetwork from the VLA model
+        if hasattr(vla, 'module'):
+            vla.module.hn_lora_hypernet.load_state_dict(state_dict)
+        else:
+            vla.hn_lora_hypernet.load_state_dict(state_dict)
+        
+        print(f"Successfully loaded HN-LoRA HyperNetwork checkpoint")
+    else:
+        print(f"Warning: HyperNetwork state file not found at {hypernet_state_path}")
+
+
 def wrap_ddp(module: nn.Module, device_id: int, find_unused: bool = False) -> DDP:
     """
     Wrap a module with DistributedDataParallel.
@@ -236,7 +312,8 @@ def init_module(
     module_args: dict,
     to_bf16: bool = False,
     find_unused_params: bool = False,
-) -> DDP:
+    distributed_state = None,
+) -> nn.Module:
     """
     Initializes a module, optionally loads checkpoint, moves to device, and wraps with DDP.
 
@@ -263,7 +340,10 @@ def init_module(
         module = module.to(torch.bfloat16)
     module = module.to(device_id)
 
-    return wrap_ddp(module, device_id, find_unused_params)
+    # Only wrap with DDP if in distributed mode
+    if distributed_state and distributed_state.num_processes > 1:
+        return wrap_ddp(module, device_id, find_unused_params)
+    return module
 
 
 def run_forward_pass(
@@ -314,7 +394,7 @@ def run_forward_pass(
 
     # [Only for diffusion] Sample noisy actions used as input for noise predictor network
     if use_diffusion:
-        noisy_dict = action_head.module.sample_noisy_actions(ground_truth_actions)
+        noisy_dict = (action_head.module if hasattr(action_head, 'module') else action_head).sample_noisy_actions(ground_truth_actions)
         noise, noisy_actions, diffusion_timestep_embeddings = (
             noisy_dict["noise"],
             noisy_dict["noisy_actions"],
@@ -331,7 +411,7 @@ def run_forward_pass(
             pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
             labels=batch["labels"],
             output_hidden_states=True,
-            proprio=batch["proprio"] if use_proprio else None,
+            proprio=batch["proprio"].to(device_id) if use_proprio else None,
             proprio_projector=proprio_projector if use_proprio else None,
             noisy_actions=noisy_actions if use_diffusion else None,
             noisy_action_projector=noisy_action_projector if use_diffusion else None,
@@ -385,13 +465,13 @@ def run_forward_pass(
 
         if use_l1_regression:
             # Predict action
-            predicted_actions = action_head.module.predict_action(actions_hidden_states)
+            predicted_actions = (action_head.module if hasattr(action_head, 'module') else action_head).predict_action(actions_hidden_states)
             # Get full L1 loss
             loss = torch.nn.L1Loss()(ground_truth_actions, predicted_actions)
 
         if use_diffusion:
             # Predict noise
-            noise_pred = action_head.module.predict_noise(actions_hidden_states)
+            noise_pred = (action_head.module if hasattr(action_head, 'module') else action_head).predict_noise(actions_hidden_states)
             # Get diffusion noise prediction MSE loss
             noise_pred = noise_pred.reshape(noise.shape)
             loss = nn.functional.mse_loss(noise_pred, noise, reduction="mean")
@@ -485,16 +565,17 @@ def run_diffusion_sampling(
     )  # (B, chunk_len, action_dim)
 
     # Set diffusion timestep values
-    action_head.module.noise_scheduler.set_timesteps(action_head.module.num_diffusion_steps_train)
+    action_head_unwrapped = action_head.module if hasattr(action_head, 'module') else action_head
+    action_head_unwrapped.noise_scheduler.set_timesteps(action_head_unwrapped.num_diffusion_steps_train)
 
     # Reverse diffusion: Iteratively denoise to generate action, conditioned on observation
     curr_noisy_actions = noise
-    for t in action_head.module.noise_scheduler.timesteps:
+    for t in action_head_unwrapped.noise_scheduler.timesteps:
         # Get diffusion model's noise prediction (conditioned on VLA latent embedding, current noisy action embedding,
         # and diffusion timestep embedding)
         timesteps = torch.Tensor([t]).repeat(batch_size).to(device_id)
         diffusion_timestep_embeddings = (
-            action_head.module.time_encoder(timesteps).to(curr_noisy_actions.dtype).to(curr_noisy_actions.device)
+            action_head_unwrapped.time_encoder(timesteps).to(curr_noisy_actions.dtype).to(curr_noisy_actions.device)
         )  # (B, llm_dim)
         diffusion_timestep_embeddings = diffusion_timestep_embeddings.unsqueeze(1)  # (B, 1, llm_dim)
 
@@ -505,7 +586,7 @@ def run_diffusion_sampling(
                 pixel_values=batch["pixel_values"].to(torch.bfloat16).to(device_id),
                 labels=batch["labels"],
                 output_hidden_states=True,
-                proprio=batch["proprio"] if use_proprio else None,
+                proprio=batch["proprio"].to(device_id) if use_proprio else None,
                 proprio_projector=proprio_projector if use_proprio else None,
                 noisy_actions=curr_noisy_actions,
                 noisy_action_projector=noisy_action_projector,
@@ -522,10 +603,10 @@ def run_diffusion_sampling(
             )  # (B, act_chunk_len, D)
             actions_hidden_states = actions_hidden_states.to(torch.bfloat16)
             # Predict noise
-            noise_pred = action_head.module.predict_noise(actions_hidden_states)
+            noise_pred = (action_head.module if hasattr(action_head, 'module') else action_head).predict_noise(actions_hidden_states)
 
         # Compute the action at the previous diffusion timestep: x_t -> x_{t-1}
-        curr_noisy_actions = action_head.module.noise_scheduler.step(noise_pred, t, curr_noisy_actions).prev_sample
+        curr_noisy_actions = action_head_unwrapped.noise_scheduler.step(noise_pred, t, curr_noisy_actions).prev_sample
 
     return curr_noisy_actions.reshape(actions_shape)
 
@@ -618,14 +699,15 @@ def save_training_checkpoint(
         save_dataset_statistics(train_dataset.dataset_statistics, checkpoint_dir)
         print(f"Saving Model Checkpoint for Step {log_step}")
 
-    # Wait for directories to be created
-    dist.barrier()
+    # Wait for directories to be created (only in distributed mode)
+    if distributed_state.num_processes > 1:
+        dist.barrier()
 
     # Save model components (main process only)
     if distributed_state.is_main_process:
         # Save processor and LoRA adapter
         processor.save_pretrained(checkpoint_dir)
-        vla.module.save_pretrained(adapter_dir)
+        (vla.module if hasattr(vla, 'module') else vla).save_pretrained(adapter_dir)
 
         # Save other components
         if cfg.use_proprio and proprio_projector is not None:
@@ -642,15 +724,45 @@ def save_training_checkpoint(
         if cfg.use_film:
             # To be safe, just save the entire vision backbone (not just FiLM components)
             torch.save(
-                vla.module.vision_backbone.state_dict(), checkpoint_dir / f"vision_backbone--{checkpoint_name_suffix}"
+                (vla.module if hasattr(vla, 'module') else vla).vision_backbone.state_dict(), checkpoint_dir / f"vision_backbone--{checkpoint_name_suffix}"
             )
 
-    # Wait for model components to be saved
-    dist.barrier()
+    # Wait for model components to be saved (only in distributed mode)
+    if distributed_state.num_processes > 1:
+        dist.barrier()
 
+    # Handle HN-LoRA checkpoint saving differently
+    if cfg.use_hn_lora:
+        # For HN-LoRA, save only the HyperNetwork parameters
+        if distributed_state.is_main_process:
+            hn_lora_checkpoint_dir = checkpoint_dir / "hn_lora_hypernet"
+            hn_lora_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+            
+            # Save HyperNetwork state dict
+            hn_hypernet = (vla.module if hasattr(vla, 'module') else vla).hn_lora_hypernet
+            torch.save(hn_hypernet.state_dict(), hn_lora_checkpoint_dir / "hypernet_state.pt")
+            
+            # Save HN-LoRA configuration
+            hn_config = {
+                "lora_rank": cfg.lora_rank,
+                "lora_alpha": cfg.lora_alpha,
+                "lora_dropout": cfg.lora_dropout,
+                "context_embedding_dim": cfg.hn_context_dim,
+                "context_encoder_type": cfg.hn_encoder_type,
+                "context_encoder_layers": cfg.hn_encoder_layers,
+                "context_encoder_heads": cfg.hn_encoder_heads,
+                "mlp_hidden_dim": cfg.hn_mlp_dim,
+                "embedding_dropout": cfg.hn_embedding_dropout,
+            }
+            import json
+            with open(hn_lora_checkpoint_dir / "hn_lora_config.json", "w") as f:
+                json.dump(hn_config, f, indent=2)
+            
+            print(f"Saved HN-LoRA HyperNetwork for Step {log_step} at: {hn_lora_checkpoint_dir}")
+    
     # Merge LoRA weights into base model and save resulting model checkpoint
     # Note: Can be very slow on some devices; if so, we recommend merging offline
-    if cfg.use_lora and cfg.merge_lora_during_training:
+    elif cfg.use_lora and cfg.merge_lora_during_training:
         base_vla = AutoModelForVision2Seq.from_pretrained(
             cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
         )
@@ -661,8 +773,9 @@ def save_training_checkpoint(
             merged_vla.save_pretrained(checkpoint_dir)
             print(f"Saved merged model for Step {log_step} at: {checkpoint_dir}")
 
-        # Wait for merged model to be saved
-        dist.barrier()
+        # Wait for merged model to be saved (only in distributed mode)
+        if distributed_state.num_processes > 1:
+            dist.barrier()
 
 
 def run_validation(
@@ -770,6 +883,37 @@ def finetune(cfg: FinetuneConfig) -> None:
     assert not (cfg.use_l1_regression and cfg.use_diffusion), (
         "Cannot do both L1 regression and diffusion. Please pick one of them!"
     )
+    
+    # Import HN-LoRA version if needed
+    global HN_LORA_AVAILABLE, HN_LORA_VERSION, get_hn_lora_model, HNLoRAConfig
+    if cfg.use_hn_lora:
+        if cfg.hn_lora_version == "v10_extreme":
+            try:
+                from hn_lora_openvla_v10_extreme import get_hn_lora_model, HNLoRAConfig
+                HN_LORA_AVAILABLE = True
+                HN_LORA_VERSION = "v10_extreme"
+                print("Using HN-LoRA v10 EXTREME (ultra-optimized for speed)")
+            except ImportError as e:
+                print(f"Error importing HN-LoRA v10_extreme: {e}")
+                raise ImportError("HN-LoRA v10_extreme is not available. Please check the hn_lora_openvla_v10_extreme.py file exists in vla-scripts/")
+        elif cfg.hn_lora_version == "v9_optimized":
+            try:
+                from hn_lora_openvla_v9_optimized import get_hn_lora_model_v9 as get_hn_lora_model, HNLoRAConfig
+                HN_LORA_AVAILABLE = True
+                HN_LORA_VERSION = "v9_optimized"
+                print("Using HN-LoRA v9 Optimized (vmap + torch.compile)")
+            except ImportError as e:
+                print(f"Error importing HN-LoRA v9_optimized: {e}")
+                raise ImportError("HN-LoRA v9_optimized is not available. Please check the hn_lora_openvla_v9_optimized.py file exists in vla-scripts/")
+        else:  # Default to v8
+            try:
+                from hn_lora_openvla_v8 import get_hn_lora_model, HNLoRAConfig
+                HN_LORA_AVAILABLE = True
+                HN_LORA_VERSION = "v8"
+                print("Using HN-LoRA v8 (grouped shared output heads)")
+            except ImportError as e:
+                print(f"Error importing HN-LoRA v8: {e}")
+                raise ImportError("HN-LoRA v8 is not available. Please check the hn_lora_openvla_v8.py file exists in vla-scripts/")
 
     # Trim trailing forward slash ('/') in VLA path if it exists
     cfg.vla_path = cfg.vla_path.rstrip("/")
@@ -784,15 +928,19 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # GPU setup
     distributed_state = PartialState()
-    device_id = distributed_state.local_process_index
+    # Use LOCAL_RANK environment variable for proper device assignment in torchrun
+    if "LOCAL_RANK" in os.environ:
+        device_id = int(os.environ["LOCAL_RANK"])
+    else:
+        device_id = distributed_state.local_process_index
+    
+    print(f"Process {distributed_state.process_index}: Using GPU device_id={device_id}")
     torch.cuda.set_device(device_id)
     torch.cuda.empty_cache()
 
     # Initialize wandb logging
     if distributed_state.is_main_process:
-        # TODO: enter your wandb key here
-        wandb.login(key="")
-        wandb.init(project=cfg.wandb_project, name=f"ft+{run_id}")
+        wandb.init(entity=cfg.wandb_entity, project=cfg.wandb_project, name=f"ft+{run_id}")
 
     # Print detected constants
     print(
@@ -829,8 +977,9 @@ def finetune(cfg: FinetuneConfig) -> None:
         update_auto_map(cfg.vla_path)
         check_model_logic_mismatch(cfg.vla_path)
 
-    # Wait for model files to be synced
-    dist.barrier()
+    # Wait for model files to be synced (only in distributed mode)
+    if distributed_state.num_processes > 1:
+        dist.barrier()
 
     # Load processor and VLA
     processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
@@ -846,14 +995,49 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # LoRA setup
     if cfg.use_lora:
-        lora_config = LoraConfig(
-            r=cfg.lora_rank,
-            lora_alpha=min(cfg.lora_rank, 16),
-            lora_dropout=cfg.lora_dropout,
-            target_modules="all-linear",
-            init_lora_weights="gaussian",
-        )
-        vla = get_peft_model(vla, lora_config)
+        if cfg.use_hn_lora:
+            # Use HN-LoRA (HyperNetwork LoRA)
+            if not HN_LORA_AVAILABLE:
+                raise ImportError("HN-LoRA is not available. Please check the hn_lora_openvla_v2.py file exists in vla-scripts/")
+            print(f"Using HN-LoRA {HN_LORA_VERSION} (HyperNetwork LoRA) for task-conditioned adaptation")
+            hn_config = HNLoRAConfig(
+                lora_rank=cfg.lora_rank,
+                lora_alpha=min(cfg.lora_rank, 16),
+                lora_dropout=cfg.lora_dropout,
+                context_embedding_dim=cfg.hn_context_dim,
+                context_encoder_type=cfg.hn_encoder_type,
+                context_encoder_layers=cfg.hn_encoder_layers,
+                context_encoder_heads=cfg.hn_encoder_heads,
+                mlp_hidden_dim=cfg.hn_mlp_dim,
+                embedding_dropout=cfg.hn_embedding_dropout,
+            )
+            # Auto-detect model dimensions
+            if hasattr(vla, 'config'):
+                hn_config.hidden_size = getattr(vla.config, 'hidden_size', 
+                                               getattr(vla.config, 'd_model', 768))
+                hn_config.num_hidden_layers = getattr(vla.config, 'num_hidden_layers',
+                                                     getattr(vla.config, 'num_layers', 12))
+            vla = get_hn_lora_model(vla, hn_config)
+            
+            # Load HN-LoRA checkpoint if resuming
+            if cfg.resume:
+                load_hn_lora_checkpoint(vla, cfg.vla_path, cfg.resume_step, device=device_id)
+            
+            # Print HN-LoRA summary if available
+            if hasattr(vla, 'print_hn_lora_summary'):
+                vla.print_hn_lora_summary(show_lora_layers=False)
+        else:
+            # Use standard LoRA
+            print("Using standard LoRA for fine-tuning")
+            lora_config = LoraConfig(
+                r=cfg.lora_rank,
+                lora_alpha=min(cfg.lora_rank, 16),
+                lora_dropout=cfg.lora_dropout,
+                target_modules="all-linear",
+                init_lora_weights="gaussian",
+            )
+            vla = get_peft_model(vla, lora_config)
+        
         vla.print_trainable_parameters()
 
     # FiLM setup
@@ -873,8 +1057,9 @@ def finetune(cfg: FinetuneConfig) -> None:
             vla.model.vision_backbone.load_state_dict(state_dict)
         vla.model.vision_backbone = vla.model.vision_backbone.to(device_id)
 
-    # Wrap VLA with DDP
-    vla = wrap_ddp(vla, device_id, find_unused=True)
+    # Wrap VLA with DDP (only in distributed mode)
+    if distributed_state.num_processes > 1:
+        vla = wrap_ddp(vla, device_id, find_unused=True)
 
     # If applicable, instantiate proprio projector
     if cfg.use_proprio:
@@ -883,7 +1068,8 @@ def finetune(cfg: FinetuneConfig) -> None:
             "proprio_projector",
             cfg,
             device_id,
-            {"llm_dim": vla.module.llm_dim, "proprio_dim": PROPRIO_DIM},
+            {"llm_dim": vla.llm_dim if not hasattr(vla, 'module') else vla.module.llm_dim, "proprio_dim": PROPRIO_DIM},
+            distributed_state=distributed_state,
         )
 
     # If applicable, instantiate continuous action head for L1 regression
@@ -893,8 +1079,9 @@ def finetune(cfg: FinetuneConfig) -> None:
             "action_head",
             cfg,
             device_id,
-            {"input_dim": vla.module.llm_dim, "hidden_dim": vla.module.llm_dim, "action_dim": ACTION_DIM},
+            {"input_dim": vla.llm_dim if not hasattr(vla, 'module') else vla.module.llm_dim, "hidden_dim": vla.llm_dim if not hasattr(vla, 'module') else vla.module.llm_dim, "action_dim": ACTION_DIM},
             to_bf16=True,
+            distributed_state=distributed_state,
         )
 
     # If applicable, instantiate diffusion action head and noisy action projector
@@ -905,19 +1092,22 @@ def finetune(cfg: FinetuneConfig) -> None:
             cfg,
             device_id,
             {
-                "input_dim": vla.module.llm_dim,
-                "hidden_dim": vla.module.llm_dim,
+                "input_dim": vla.llm_dim if not hasattr(vla, 'module') else vla.module.llm_dim,
+                "hidden_dim": vla.llm_dim if not hasattr(vla, 'module') else vla.module.llm_dim,
                 "action_dim": ACTION_DIM,
                 "num_diffusion_steps_train": cfg.num_diffusion_steps_train,
             },
             to_bf16=True,
+            distributed_state=distributed_state,
         )
         noisy_action_projector = init_module(
-            NoisyActionProjector, "noisy_action_projector", cfg, device_id, {"llm_dim": vla.module.llm_dim}
+            NoisyActionProjector, "noisy_action_projector", cfg, device_id, {"llm_dim": vla.llm_dim if not hasattr(vla, 'module') else vla.module.llm_dim},
+            distributed_state=distributed_state,
         )
 
     # Get number of vision patches
-    NUM_PATCHES = vla.module.vision_backbone.get_num_patches() * vla.module.vision_backbone.get_num_images_in_input()
+    vla_model = vla.module if hasattr(vla, 'module') else vla
+    NUM_PATCHES = vla_model.vision_backbone.get_num_patches() * vla_model.vision_backbone.get_num_images_in_input()
     # If we have proprio inputs, a single proprio embedding is appended to the end of the vision patch embeddings
     if cfg.use_proprio:
         NUM_PATCHES += 1
@@ -981,7 +1171,7 @@ def finetune(cfg: FinetuneConfig) -> None:
         cfg.data_root_dir,
         cfg.dataset_name,
         batch_transform,
-        resize_resolution=tuple(vla.module.config.image_sizes),
+        resize_resolution=tuple((vla.module if hasattr(vla, 'module') else vla).config.image_sizes),
         shuffle_buffer_size=cfg.shuffle_buffer_size,
         image_aug=cfg.image_aug,
     )
@@ -990,7 +1180,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             cfg.data_root_dir,
             cfg.dataset_name,
             batch_transform,
-            resize_resolution=tuple(vla.module.config.image_sizes),
+            resize_resolution=tuple((vla.module if hasattr(vla, 'module') else vla).config.image_sizes),
             shuffle_buffer_size=cfg.shuffle_buffer_size // 10,
             image_aug=cfg.image_aug,
             train=False,
