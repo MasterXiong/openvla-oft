@@ -64,11 +64,14 @@ RUN pip install "flash-attn==2.5.5" --no-build-isolation
 RUN pip install opencv-python==4.10.0.84 numpy==1.26.4
 
 # install LIBERO
-RUN git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
-RUN pip install -e LIBERO
 RUN pip install -r experiments/robot/libero/libero_requirements.txt
+WORKDIR /
+RUN git clone https://github.com/Lifelong-Robot-Learning/LIBERO.git
+WORKDIR /LIBERO
+RUN pip install -e .
 
 # Change permissions
+WORKDIR /user/openvla-oft
 RUN groupadd -g ${GROUP_ID} user
 RUN useradd --shell /bin/bash -u ${USER_ID} -g ${GROUP_ID} -o -d /user user
 RUN chown -R user:user /user && chmod -R u+w /user
