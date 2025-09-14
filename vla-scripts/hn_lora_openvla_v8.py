@@ -216,7 +216,8 @@ class HyperNetwork(nn.Module):
                 config.context_embedding_dim, config.lora_rank * out_dim
             )
             # Initialize
-            nn.init.normal_(self.output_heads[key_str + "_down"].weight, std=0.02)
+            nn.init.zeros_(self.output_heads[key_str + "_down"].weight)
+            nn.init.normal_(self.output_heads[key_str + "_down"].bias, std=0.001)
             nn.init.zeros_(self.output_heads[key_str + "_up"].weight)
             nn.init.zeros_(self.output_heads[key_str + "_up"].bias)
         
