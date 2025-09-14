@@ -476,8 +476,11 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
             
             if isinstance(child, nn.Linear):
                 # Check if it's a target layer (MLP/FFN in the language model)
-                is_target = any(p in full_name.lower() for p in ['mlp', 'ffn', 'gate', 'up_proj', 'down_proj'])
-                is_llm = 'llm_backbone' in full_name or 'language_model' in full_name
+                # Apply LoRA to all linear layers
+                # is_target = any(p in full_name.lower() for p in ['mlp', 'ffn', 'gate', 'up_proj', 'down_proj'])
+                is_target = True
+                # is_llm = 'llm_backbone' in full_name or 'language_model' in full_name
+                is_llm = True
                 
                 if is_target and is_llm:
                     # Create HNLoRALinear to replace the original
