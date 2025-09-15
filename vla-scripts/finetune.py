@@ -651,17 +651,47 @@ def save_training_checkpoint(
     # Merge LoRA weights into base model and save resulting model checkpoint
     # Note: Can be very slow on some devices; if so, we recommend merging offline
     if cfg.use_lora and cfg.merge_lora_during_training:
-        base_vla = AutoModelForVision2Seq.from_pretrained(
-            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
-        )
-        merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
-        merged_vla = merged_vla.merge_and_unload()
-
         if distributed_state.is_main_process:
-            merged_vla.save_pretrained(checkpoint_dir)
-            print(f"Saved merged model for Step {log_step} at: {checkpoint_dir}")
+            try:
+                # Force load on CPU to avoid interfering with training GPUs on other ranks
+                try:
+                    base_vla = AutoModelForVision2Seq.from_pretrained(
+                        cfg.vla_path,
+                        torch_dtype=torch.bfloat16,
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=True,
+                        device_map="cpu",
+                    )
+                except TypeError:
+                    # Fallback for older transformers versions without device_map arg
+                    base_vla = AutoModelForVision2Seq.from_pretrained(
+                        cfg.vla_path,
+                        torch_dtype=torch.bfloat16,
+                        low_cpu_mem_usage=True,
+                        trust_remote_code=True,
+                    )
+                    base_vla = base_vla.to("cpu")
 
-        # Wait for merged model to be saved
+                # Load LoRA adapter strictly on CPU and merge
+                try:
+                    merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir, device_map="cpu")
+                except TypeError:
+                    # Older peft versions may not support device_map here
+                    merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
+                    merged_vla = merged_vla.to("cpu")
+
+                merged_vla = merged_vla.merge_and_unload()
+                merged_vla.save_pretrained(checkpoint_dir)
+                print(f"Saved merged model for Step {log_step} at: {checkpoint_dir}")
+            except Exception as e:
+                # Don't crash training if online merge fails; instruct user to merge offline
+                print(
+                    f"[Warning] LoRA merge during training failed at step {log_step}: {e}\n"
+                    "You can continue training; to avoid this warning set --merge_lora_during_training False\n"
+                    f"To merge offline later, use vla-scripts/merge_lora_weights_and_save.py against {adapter_dir}"
+                )
+
+        # Wait for merged model (or skip) to complete on main process
         dist.barrier()
 
 
