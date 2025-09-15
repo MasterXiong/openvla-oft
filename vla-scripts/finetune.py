@@ -34,8 +34,6 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 import wandb
 
-import sys
-sys.path.append('/homes/80/kang/openvla-oft')
 from experiments.robot.openvla_utils import (
     check_model_logic_mismatch,
     model_is_on_hf_hub,
@@ -74,7 +72,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 import os
-# os.environ ["WANDB_API_KEY"] = "41f4ee88a220359a48d63a1a4239c83862288bb0"
+os.environ ["WANDB_API_KEY"] = ""
 os.environ ["WANDB_MODE"] = "online"
 # os.environ["WANDB_BASE_URL"] = "https://api.wandb-cn.top"
 os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
@@ -126,6 +124,7 @@ class FinetuneConfig:
     # LoRA
     use_lora: bool = True                            # If True, uses LoRA fine-tuning
     lora_rank: int = 32                              # Rank of LoRA weight matrix
+    lora_alpha: float = 1.0                          # LoRA alpha (scaling factor)
     lora_dropout: float = 0.0                        # Dropout applied to LoRA weights
     merge_lora_during_training: bool = True          # If True, merges LoRA weights and saves result during training
                                                      #   Note: Merging can be very slow on some machines. If so, set to
@@ -1002,7 +1001,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             print(f"Using HN-LoRA {HN_LORA_VERSION} (HyperNetwork LoRA) for task-conditioned adaptation")
             hn_config = HNLoRAConfig(
                 lora_rank=cfg.lora_rank,
-                lora_alpha=min(cfg.lora_rank, 16),
+                lora_alpha=cfg.lora_alpha,
                 lora_dropout=cfg.lora_dropout,
                 context_embedding_dim=cfg.hn_context_dim,
                 context_encoder_type=cfg.hn_encoder_type,
