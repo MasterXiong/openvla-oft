@@ -157,7 +157,7 @@ class HyperNetwork(nn.Module):
     def __init__(self, config: HNLoRAConfig, layer_dims: List[Tuple[int, int]]):
         super().__init__()
         self.config = config
-        self.layer_dims = layer_dims  # List of (in_features, out_features) for each layer
+        self.layer_dims = layer_dims  # List of (layer_name, (in_features, out_features)) for each layer
         self.num_layers = len(layer_dims)
         
         # Layer embeddings
@@ -198,50 +198,46 @@ class HyperNetwork(nn.Module):
         
         # Group layers by dimensions and create shared output heads for each group
         # This is the key insight from the paper - reuse output heads for layers with same dimensions
-        self.dim_groups = {}  # Maps (in_dim, out_dim) -> list of layer indices
-        for idx, (in_dim, out_dim) in enumerate(layer_dims):
-            key = (in_dim, out_dim)
-            if key not in self.dim_groups:
-                self.dim_groups[key] = []
-            self.dim_groups[key].append(idx)
+        self.output_head_groups = {}  # Maps (in_dim, out_dim) -> list of layer indices
+        self.output_head_dim = {}
+        for idx, (layer_name, (in_dim, out_dim)) in enumerate(layer_dims):
+            if layer_name not in self.output_head_groups:
+                self.output_head_groups[layer_name] = []
+                self.output_head_dim[layer_name] = (in_dim, out_dim)
+            self.output_head_groups[layer_name].append(idx)
         
         # Create shared output heads for each unique dimension pair
         self.output_heads = nn.ModuleDict()
-        for (in_dim, out_dim) in self.dim_groups.keys():
-            key_str = f"{in_dim}_{out_dim}"  # ModuleDict requires string keys
-            self.output_heads[key_str + "_down"] = nn.Linear(
+        for layer_name in self.output_head_groups:
+            in_dim, out_dim = self.output_head_dim[layer_name]
+            layer_indices = self.output_head_groups[layer_name]
+            self.output_heads[layer_name + "_down"] = nn.Linear(
                 config.context_embedding_dim, in_dim * config.lora_rank
             )
-            self.output_heads[key_str + "_up"] = nn.Linear(
+            self.output_heads[layer_name + "_up"] = nn.Linear(
                 config.context_embedding_dim, config.lora_rank * out_dim
             )
             # Initialize
-            nn.init.zeros_(self.output_heads[key_str + "_down"].weight)
-            nn.init.normal_(self.output_heads[key_str + "_down"].bias, std=0.001)
-            nn.init.zeros_(self.output_heads[key_str + "_up"].weight)
-            nn.init.zeros_(self.output_heads[key_str + "_up"].bias)
+            nn.init.zeros_(self.output_heads[layer_name + "_down"].weight)
+            nn.init.normal_(self.output_heads[layer_name + "_down"].bias, std=0.001)
+            nn.init.zeros_(self.output_heads[layer_name + "_up"].weight)
+            nn.init.zeros_(self.output_heads[layer_name + "_up"].bias)
         
-        print(f"\nCreated {len(self.dim_groups)} shared output head groups for {self.num_layers} layers")
-        print("="*80)
-        
-        # Print detailed information about each dimension group
-        for group_idx, ((in_dim, out_dim), layer_indices) in enumerate(self.dim_groups.items(), 1):
-            print(f"\nGroup {group_idx}: Dimension ({in_dim}, {out_dim})")
+            print(f"\nGroup {layer_name}: Dimension ({in_dim}, {out_dim})")
             print(f"  Number of layers in this group: {len(layer_indices)}")
             print(f"  Layer indices: {layer_indices}")
             
             # Print output head information for this group
-            key_str = f"{in_dim}_{out_dim}"
-            down_head = self.output_heads[key_str + "_down"]
-            up_head = self.output_heads[key_str + "_up"]
+            down_head = self.output_heads[layer_name + "_down"]
+            up_head = self.output_heads[layer_name + "_up"]
             
             print(f"\n  Output heads for this group:")
-            print(f"    Down projection head '{key_str}_down':")
+            print(f"    Down projection head '{layer_name}_down':")
             print(f"      Input: {down_head.in_features} → Output: {down_head.out_features}")
             print(f"      Parameters: {sum(p.numel() for p in down_head.parameters()):,}")
             print(f"      Generates: LoRA A matrices of shape ({in_dim}, {config.lora_rank})")
             
-            print(f"    Up projection head '{key_str}_up':")
+            print(f"    Up projection head '{layer_name}_up':")
             print(f"      Input: {up_head.in_features} → Output: {up_head.out_features}")
             print(f"      Parameters: {sum(p.numel() for p in up_head.parameters()):,}")
             print(f"      Generates: LoRA B matrices of shape ({config.lora_rank}, {out_dim})")
@@ -250,7 +246,7 @@ class HyperNetwork(nn.Module):
             print(f"  Total parameters for this dimension group: {sum(p.numel() for p in down_head.parameters()) + sum(p.numel() for p in up_head.parameters()):,}")
         
         print("\n" + "="*80)
-        print(f"Summary: {self.num_layers} layers grouped into {len(self.dim_groups)} dimension groups")
+        print(f"Summary: {self.num_layers} layers grouped into {len(self.output_head_dim)} dimension groups")
         total_head_params = sum(sum(p.numel() for p in self.output_heads[name].parameters()) 
                                for name in self.output_heads)
         print(f"Total output head parameters: {total_head_params:,}")
@@ -278,19 +274,19 @@ class HyperNetwork(nn.Module):
         print(f"   - {encoder_params:,} parameters")
         print(f"4. Output Heads (largest component): {total_head_params:,} parameters")
         
-        # Detail for each group's output heads
-        for (in_dim, out_dim), layer_indices in self.dim_groups.items():
-            key_str = f"{in_dim}_{out_dim}"
-            down_params = sum(p.numel() for p in self.output_heads[key_str + "_down"].parameters())
-            up_params = sum(p.numel() for p in self.output_heads[key_str + "_up"].parameters())
-            print(f"   - Group ({in_dim}→{out_dim}): {len(layer_indices)} layers shared")
-            print(f"     • Down head: {self.output_heads[key_str + '_down'].in_features} → {self.output_heads[key_str + '_down'].out_features} = {down_params:,} parameters")
-            print(f"     • Up head: {self.output_heads[key_str + '_up'].in_features} → {self.output_heads[key_str + '_up'].out_features} = {up_params:,} parameters")
+        # # Detail for each group's output heads
+        # for (in_dim, out_dim), layer_indices in self.output_head_dim.items():
+        #     key_str = f"{in_dim}_{out_dim}"
+        #     down_params = sum(p.numel() for p in self.output_heads[key_str + "_down"].parameters())
+        #     up_params = sum(p.numel() for p in self.output_heads[key_str + "_up"].parameters())
+        #     print(f"   - Group ({in_dim}→{out_dim}): {len(layer_indices)} layers shared")
+        #     print(f"     • Down head: {self.output_heads[key_str + '_down'].in_features} → {self.output_heads[key_str + '_down'].out_features} = {down_params:,} parameters")
+        #     print(f"     • Up head: {self.output_heads[key_str + '_up'].in_features} → {self.output_heads[key_str + '_up'].out_features} = {up_params:,} parameters")
         
-        print(f"\nKey observations:")
-        print(f"• Output heads占了总参数的{100*total_head_params/total_hypernet_params:.1f}% ({total_head_params/1e6:.1f}M/{total_hypernet_params/1e6:.1f}M)")
-        print(f"• 这是性能瓶颈的主要原因")
-        print(f"• 虽然共享了heads（只有{len(self.output_heads)}个而不是{self.num_layers*2}个），但每个head仍然很大")
+        # print(f"\nKey observations:")
+        # print(f"• Output heads占了总参数的{100*total_head_params/total_hypernet_params:.1f}% ({total_head_params/1e6:.1f}M/{total_hypernet_params/1e6:.1f}M)")
+        # print(f"• 这是性能瓶颈的主要原因")
+        # print(f"• 虽然共享了heads（只有{len(self.output_heads)}个而不是{self.num_layers*2}个），但每个head仍然很大")
         
         # Calculate generated LoRA parameters
         print("\n" + "="*80)
@@ -298,17 +294,19 @@ class HyperNetwork(nn.Module):
         print("="*80)
         
         total_lora_params = 0
-        for group_idx, ((in_dim, out_dim), layer_indices) in enumerate(self.dim_groups.items(), 1):
+        for layer_name in self.output_head_groups:
+            in_dim, out_dim = self.output_head_dim[layer_name]
+            layer_indices = self.output_head_groups[layer_name]
             group_lora_A = in_dim * config.lora_rank * len(layer_indices)
             group_lora_B = config.lora_rank * out_dim * len(layer_indices)
             group_total = group_lora_A + group_lora_B
             total_lora_params += group_total
             
-            print(f"\nGroup {group_idx}: ({in_dim}, {out_dim}) - {len(layer_indices)} layers")
+            print(f"\nGroup {layer_name}: ({in_dim}, {out_dim}) - {len(layer_indices)} layers")
             print(f"  Layer indices: {layer_indices}")
             print(f"  Output heads:")
-            print(f"    • Down head: {config.context_embedding_dim}→{in_dim * config.lora_rank} ({sum(p.numel() for p in self.output_heads[f'{in_dim}_{out_dim}_down'].parameters())/1e6:.1f}M params) 生成{in_dim}×{config.lora_rank}的LoRA A")
-            print(f"    • Up head: {config.context_embedding_dim}→{config.lora_rank * out_dim} ({sum(p.numel() for p in self.output_heads[f'{in_dim}_{out_dim}_up'].parameters())/1e6:.1f}M params) 生成{config.lora_rank}×{out_dim}的LoRA B")
+            print(f"    • Down head: {config.context_embedding_dim}→{in_dim * config.lora_rank} ({sum(p.numel() for p in self.output_heads[f'{layer_name}_down'].parameters())/1e6:.1f}M params) 生成{in_dim}×{config.lora_rank}的LoRA A")
+            print(f"    • Up head: {config.context_embedding_dim}→{config.lora_rank * out_dim} ({sum(p.numel() for p in self.output_heads[f'{layer_name}_up'].parameters())/1e6:.1f}M params) 生成{config.lora_rank}×{out_dim}的LoRA B")
             print(f"  LoRA parameters to generate:")
             print(f"    • LoRA A (W_down): {group_lora_A:,} params = {in_dim}×{config.lora_rank}×{len(layer_indices)}")
             print(f"    • LoRA B (W_up): {group_lora_B:,} params = {config.lora_rank}×{out_dim}×{len(layer_indices)}")
@@ -332,7 +330,7 @@ class HyperNetwork(nn.Module):
             print("torchinfo not installed. Install with: pip install torchinfo")
             print("\nHyperNetwork Structure:")
             print(f"  Total layers to generate LoRA for: {self.num_layers}")
-            print(f"  Unique dimension groups: {len(self.dim_groups)}")
+            print(f"  Unique dimension groups: {len(self.output_head_groups)}")
             print(f"  Context embedding dim: {self.config.context_embedding_dim}")
             print(f"  LoRA rank: {self.config.lora_rank}")
             print(f"  Encoder type: {self.config.context_encoder_type}")
@@ -366,9 +364,9 @@ class HyperNetwork(nn.Module):
             verbose=2
         )
         
-        print("\nDimension Groups:")
-        for key, indices in self.dim_groups.items():
-            print(f"  {key}: {len(indices)} layers - indices {indices[:3]}..." if len(indices) > 3 else f"  {key}: {len(indices)} layers - indices {indices}")
+        # print("\nDimension Groups:")
+        # for key, indices in self.dim_groups.items():
+        #     print(f"  {key}: {len(indices)} layers - indices {indices[:3]}..." if len(indices) > 3 else f"  {key}: {len(indices)} layers - indices {indices}")
     
     def forward(self, instruction_embeds: torch.Tensor) -> List[Tuple[torch.Tensor, torch.Tensor]]:
         """Generate LoRA parameters for all layers - optimized batch processing"""
@@ -419,20 +417,15 @@ class HyperNetwork(nn.Module):
         # Process each dimension group together for efficiency
         lora_params = [None] * self.num_layers
         
-        for (in_dim, out_dim), layer_indices in self.dim_groups.items():
+        for layer_name in self.output_head_dim:
+            in_dim, out_dim = self.output_head_dim[layer_name]
+            layer_indices = self.output_head_groups[layer_name]
             # Get contexts for all layers in this group
             group_contexts = layer_contexts[:, layer_indices, :]  # (batch, group_size, dim)
-            batch_group_size = batch_size * len(layer_indices)
-            group_contexts_flat = group_contexts.reshape(batch_group_size, -1)
             
             # Use shared output heads for this dimension group
-            key_str = f"{in_dim}_{out_dim}"
-            lora_down_flat = self.output_heads[key_str + "_down"](group_contexts_flat)
-            lora_up_flat = self.output_heads[key_str + "_up"](group_contexts_flat)
-            
-            # Reshape back
-            lora_down = lora_down_flat.reshape(batch_size, len(layer_indices), in_dim * self.config.lora_rank)
-            lora_up = lora_up_flat.reshape(batch_size, len(layer_indices), self.config.lora_rank * out_dim)
+            lora_down = self.output_heads[layer_name + "_down"](group_contexts)
+            lora_up = self.output_heads[layer_name + "_up"](group_contexts)
             
             # Assign to correct positions
             for i, layer_idx in enumerate(layer_indices):
@@ -478,21 +471,25 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
                 # Check if it's a target layer (MLP/FFN in the language model)
                 # Apply LoRA to all linear layers
                 # is_target = any(p in full_name.lower() for p in ['mlp', 'ffn', 'gate', 'up_proj', 'down_proj'])
-                is_target = True
+                # is_target = True
                 # is_llm = 'llm_backbone' in full_name or 'language_model' in full_name
-                is_llm = True
+                # is_llm = True
+                # skip original VLM output head
+                if "lm_head" in full_name:
+                    continue
                 
-                if is_target and is_llm:
-                    # Create HNLoRALinear to replace the original
-                    hn_linear = HNLoRALinear(child, config.lora_rank, config.lora_alpha, config.lora_dropout)
-                    # Replace in parent module
-                    setattr(module, name, hn_linear)
-                    # Track layer
-                    lora_layers.append(hn_linear)
-                    layer_dims.append((child.in_features, child.out_features))
-                    
-                    if len(lora_layers) <= 3:  # Print first few
-                        print(f"Replaced with HN-LoRA: {full_name} ({child.in_features} -> {child.out_features})")
+                # if is_target and is_llm:
+                # Create HNLoRALinear to replace the original
+                hn_linear = HNLoRALinear(child, config.lora_rank, config.lora_alpha, config.lora_dropout)
+                # Replace in parent module
+                setattr(module, name, hn_linear)
+                # Track layer
+                lora_layers.append(hn_linear)
+                shared_layer_id = full_name.split('.')
+                shared_layer_id = '.'.join([x for x in shared_layer_id if not x.isdigit()])
+                shared_layer_id = shared_layer_id.replace('.', '/')
+                layer_dims.append((shared_layer_id, (child.in_features, child.out_features)))
+                
             else:
                 replace_linear_layers(child, full_name)
     
@@ -647,12 +644,12 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
             print(f"\nHyperNetwork Statistics:")
             print(f"  Total parameters: {hypernet_params:,}")
             print(f"  All parameters trainable: Yes")
-            print(f"  Dimension groups: {len(base_model.hn_lora_hypernet.dim_groups)}")
+            print(f"  Dimension groups: {len(base_model.hn_lora_hypernet.output_head_dim)}")
             
-            # Show dimension groups
-            print(f"\nShared Output Head Groups:")
-            for (in_dim, out_dim), indices in base_model.hn_lora_hypernet.dim_groups.items():
-                print(f"  ({in_dim}, {out_dim}): {len(indices)} layers")
+            # # Show dimension groups
+            # print(f"\nShared Output Head Groups:")
+            # for (in_dim, out_dim), indices in base_model.hn_lora_hypernet.output_head_dim.items():
+            #     print(f"  ({in_dim}, {out_dim}): {len(indices)} layers")
             
             # Detailed HyperNetwork architecture
             if TORCHINFO_AVAILABLE:
