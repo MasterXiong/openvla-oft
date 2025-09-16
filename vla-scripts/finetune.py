@@ -74,7 +74,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 import os
-os.environ ["WANDB_API_KEY"] = ""
+os.environ ["WANDB_API_KEY"] = "d687d003098a07858f49937d14c47adf893e9a5a"
 os.environ ["WANDB_MODE"] = "online"
 # os.environ["WANDB_BASE_URL"] = "https://api.wandb-cn.top"
 os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
@@ -147,7 +147,7 @@ class FinetuneConfig:
     wandb_project: str = "your-wandb-project"        # Name of WandB project
     run_id_note: Optional[str] = None                # Extra note to add to end of run ID for logging
     run_id_override: Optional[str] = None            # Optional string to override the run ID with
-    wandb_log_freq: int = 100                        # WandB logging frequency in steps
+    wandb_log_freq: int = 10                         # WandB logging frequency in steps
 
     # fmt: on
 
