@@ -1,9 +1,11 @@
 #!/bin/bash
 # HN-LoRA v9 training - Optimized with vmap + torch.compile
 # 3-phase optimization for maximum performance
-# Usage: bash run_hn_lora_v9.sh [num_gpus N]
-#   Default: single GPU (GPU 7)
-#   Multi-GPU: bash run_hn_lora_v9.sh num_gpus 8
+# Usage:
+#   Default (single GPU): bash run_hn_lora_v9.sh
+#   All 8 GPUs: bash run_hn_lora_v9.sh num_gpus 8
+#   Custom GPUs: bash run_hn_lora_v9.sh num_gpus N gpu_id id1 id2 ...
+#   Example: bash run_hn_lora_v9.sh num_gpus 2 gpu_id 6 7
 
 # Parse command line arguments
 NUM_GPUS=1
@@ -13,26 +15,51 @@ GRAD_ACCUM=1 # only for testing to be DELETED !!!
 # GRAD_ACCUM=64
 RUN_NOTE="hn_lora_v9_optimized_gpu7"
 
+# Parse command line arguments
 if [[ "$1" == "num_gpus" ]] && [[ -n "$2" ]]; then
-    if [[ "$2" == "8" ]]; then
-        NUM_GPUS=8
+    NUM_GPUS=$2
+
+    # Check if gpu_id is provided for custom GPU selection
+    if [[ "$3" == "gpu_id" ]] && [[ -n "$4" ]]; then
+        # Custom GPU IDs provided
+        shift 3  # Skip "num_gpus", N, and "gpu_id"
+        GPU_LIST=("$@")
+
+        # Validate number of GPUs matches
+        if [[ "${#GPU_LIST[@]}" != "$NUM_GPUS" ]]; then
+            echo " Error: Number of GPU IDs (${#GPU_LIST[@]}) doesn't match num_gpus ($NUM_GPUS)"
+            echo "Usage: $0 num_gpus N gpu_id id1 id2 ..."
+            exit 1
+        fi
+
+        # Join GPU IDs with comma
+        CUDA_DEVICES=$(IFS=,; echo "${GPU_LIST[*]}")
+        RUN_NOTE="hn_lora_v9_optimized_gpu${CUDA_DEVICES//,/_}"
+        echo " Multi-GPU mode: Using $NUM_GPUS GPUs ($CUDA_DEVICES)"
+
+    elif [[ "$NUM_GPUS" == "8" ]]; then
+        # Default 8 GPU configuration
         CUDA_DEVICES="0,1,2,3,4,5,6,7"
-        BATCH_SIZE=1  # Each GPU processes 8 samples
-        GRAD_ACCUM=1   
-        # GRAD_ACCUM=8   
         RUN_NOTE="hn_lora_v9_optimized_8gpu"
-        echo " Multi-GPU mode: Using 8 GPUs (batch_size=8 per GPU)"
+        echo " Multi-GPU mode: Using all 8 GPUs (0-7)"
+
     else
-        echo " Error: Only 'num_gpus 8' is supported for multi-GPU training"
-        echo "Usage: $0 [num_gpus 8]"
+        echo " Error: For num_gpus != 8, you must specify GPU IDs"
+        echo "Usage: $0 num_gpus N gpu_id id1 id2 ..."
+        echo "Example: $0 num_gpus 2 gpu_id 6 7"
         exit 1
     fi
+
+    # Adjust batch size and gradient accumulation for multi-GPU
+    BATCH_SIZE=1
+    GRAD_ACCUM=1
+    # GRAD_ACCUM=8  # Uncomment for production
 else
-    echo " Single-GPU mode: Using GPU 7 (batch_size=1, grad_accum=8)"
+    echo " Single-GPU mode: Using GPU 7 (batch_size=1, grad_accum=1)"
 fi
 
-export PYTHONPATH=/homes/80/kang/openvla-oft:$PYTHONPATH
-cd /homes/80/kang/openvla-oft
+export PYTHONPATH=/homes/80/kang/zheng_openvla_oft/openvla-oft:$PYTHONPATH
+cd /homes/80/kang/zheng_openvla_oft/openvla-oft
 
 echo ""
 echo "Starting HN-LoRA v9 Optimized training..."
@@ -65,6 +92,7 @@ echo ""
 # Set memory optimization environment variables
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
+# TEMPORARY TESTING: save_freq set to 10 - RESTORE TO 10000 AFTER TESTING!!!
 CUDA_VISIBLE_DEVICES=$CUDA_DEVICES /homes/80/kang/anaconda3/envs/openvla-oft/bin/torchrun --standalone --nnodes 1 --nproc-per-node $NUM_GPUS vla-scripts/finetune.py \
     --vla_path openvla/openvla-7b \
     --data_root_dir /homes/80/kang/modified_libero_rlds_new \
@@ -80,7 +108,7 @@ CUDA_VISIBLE_DEVICES=$CUDA_DEVICES /homes/80/kang/anaconda3/envs/openvla-oft/bin
     --learning_rate 5e-4 \
     --num_steps_before_decay 100000 \
     --max_steps 150005 \
-    --save_freq 10000 \
+    --save_freq 10 \
     --save_latest_checkpoint_only False \
     --image_aug True \
     --use_lora True \

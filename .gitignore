@@ -151,3 +151,22 @@ data/
 # Rollout videos and wandb logs
 rollouts/
 wandb/
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/dataset_statistics.json
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/action_head--10_checkpoint.pt
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/added_tokens.json
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/dataset_statistics.json
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/preprocessor_config.json
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/processor_config.json
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/proprio_projector--10_checkpoint.pt
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/special_tokens_map.json
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/tokenizer_config.json
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/tokenizer.json
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/tokenizer.model
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/hn_lora_hypernet/hn_lora_config.json
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/10_chkpt/hn_lora_hypernet/hypernet_state.pt
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/20_chkpt/action_head--20_checkpoint.pt
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/20_chkpt/added_tokens.json
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/20_chkpt/dataset_statistics.json
+runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/20_chkpt/preprocessor_config.json
+
+runs/**
