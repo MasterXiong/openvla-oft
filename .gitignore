@@ -170,3 +170,4 @@ runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32
 runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7/20_chkpt/preprocessor_config.json
 
 runs/**
+experiments/logs/EVAL-libero_spatial-openvla-2025_09_16-18_40_49.txt
