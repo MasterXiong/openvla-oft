@@ -694,7 +694,10 @@ def save_training_checkpoint(
         checkpoint_dir = Path(str(run_dir) + f"--{log_step}_chkpt")
         checkpoint_name_suffix = f"{log_step}_checkpoint.pt"
 
-    adapter_dir = checkpoint_dir / "lora_adapter"
+    if cfg.use_hn_lora:
+        adapter_dir = checkpoint_dir / "hn_lora_adapter"
+    else:
+        adapter_dir = checkpoint_dir / "lora_adapter"
 
     # Create directories and save dataset statistics (main process only)
     if distributed_state.is_main_process:
@@ -710,105 +713,28 @@ def save_training_checkpoint(
     if distributed_state.is_main_process:
         # Save processor and LoRA adapter
         processor.save_pretrained(checkpoint_dir)
-        vla.module.save_pretrained(adapter_dir)
+        if cfg.use_hn_lora:
+            # Save HyperNetwork state dict
+            hn_hypernet = (vla.module if hasattr(vla, 'module') else vla).hn_lora_hypernet
+            torch.save(hn_hypernet.state_dict(), adapter_dir / "hypernet_state.pt")
+            
+            # Save HN-LoRA configuration
+            hn_config = {
+                "lora_rank": cfg.lora_rank,
+                "lora_alpha": cfg.lora_alpha,
+                "lora_dropout": cfg.lora_dropout,
+                "context_embedding_dim": cfg.hn_context_dim,
+                "context_encoder_type": cfg.hn_encoder_type,
+                "context_encoder_layers": cfg.hn_encoder_layers,
+                "context_encoder_heads": cfg.hn_encoder_heads,
+                "mlp_hidden_dim": cfg.hn_mlp_dim,
+                "embedding_dropout": cfg.hn_embedding_dropout,
+            }
+            with open(adapter_dir / "hn_lora_config.json", "w") as f:
+                json.dump(hn_config, f, indent=2)
 
-        # Save other components
-        if cfg.use_proprio and proprio_projector is not None:
-            torch.save(proprio_projector.state_dict(), checkpoint_dir / f"proprio_projector--{checkpoint_name_suffix}")
-
-        if cfg.use_diffusion and noisy_action_projector is not None:
-            torch.save(
-                noisy_action_projector.state_dict(), checkpoint_dir / f"noisy_action_projector--{checkpoint_name_suffix}"
-            )
-
-        if (cfg.use_l1_regression or cfg.use_diffusion) and action_head is not None:
-            torch.save(action_head.state_dict(), checkpoint_dir / f"action_head--{checkpoint_name_suffix}")
-
-        if cfg.use_film:
-            # To be safe, just save the entire vision backbone (not just FiLM components)
-            torch.save(
-                vla.module.vision_backbone.state_dict(), checkpoint_dir / f"vision_backbone--{checkpoint_name_suffix}"
-            )
-
-    # Wait for model components to be saved
-    dist.barrier()
-
-    # Merge LoRA weights into base model and save resulting model checkpoint
-    # Note: Can be very slow on some devices; if so, we recommend merging offline
-    if cfg.use_lora and cfg.merge_lora_during_training:
-        base_vla = AutoModelForVision2Seq.from_pretrained(
-            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
-        )
-        merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
-        merged_vla = merged_vla.merge_and_unload()
-
-        if distributed_state.is_main_process:
-            merged_vla.save_pretrained(checkpoint_dir)
-            print(f"Saved merged model for Step {log_step} at: {checkpoint_dir}")
-
-        # Wait for merged model to be saved
-        dist.barrier()
-
-
-def save_hn_training_checkpoint(
-    cfg,
-    run_dir,
-    log_step,
-    vla,
-    processor,
-    proprio_projector,
-    noisy_action_projector,
-    action_head,
-    train_dataset,
-    distributed_state,
-) -> None:
-
-    if cfg.save_latest_checkpoint_only:
-        checkpoint_dir = run_dir
-        checkpoint_name_suffix = "latest_checkpoint.pt"
-    else:
-        checkpoint_dir = Path(f"{run_dir}/{log_step}_chkpt")
-        checkpoint_name_suffix = f"{log_step}_checkpoint.pt"
-
-    # Create directories and save dataset statistics (main process only)
-    if distributed_state.is_main_process:
-        os.makedirs(checkpoint_dir, exist_ok=True)
-        save_dataset_statistics(train_dataset.dataset_statistics, checkpoint_dir)
-        print(f"Saving Model Checkpoint for Step {log_step}")
-
-    # Wait for directories to be created (only in distributed mode)
-    if distributed_state.num_processes > 1:
-        dist.barrier()
-
-    # Save model components (main process only)
-    if distributed_state.is_main_process:
-        # Save processor
-        processor.save_pretrained(checkpoint_dir)
-        # save HyperLoRA params
-        # For HN-LoRA, save only the HyperNetwork parameters
-        hn_lora_checkpoint_dir = checkpoint_dir / "hn_lora_hypernet"
-        hn_lora_checkpoint_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save HyperNetwork state dict
-        hn_hypernet = (vla.module if hasattr(vla, 'module') else vla).hn_lora_hypernet
-        torch.save(hn_hypernet.state_dict(), hn_lora_checkpoint_dir / "hypernet_state.pt")
-        
-        # Save HN-LoRA configuration
-        hn_config = {
-            "lora_rank": cfg.lora_rank,
-            "lora_alpha": cfg.lora_alpha,
-            "lora_dropout": cfg.lora_dropout,
-            "context_embedding_dim": cfg.hn_context_dim,
-            "context_encoder_type": cfg.hn_encoder_type,
-            "context_encoder_layers": cfg.hn_encoder_layers,
-            "context_encoder_heads": cfg.hn_encoder_heads,
-            "mlp_hidden_dim": cfg.hn_mlp_dim,
-            "embedding_dropout": cfg.hn_embedding_dropout,
-        }
-        with open(hn_lora_checkpoint_dir / "hn_lora_config.json", "w") as f:
-            json.dump(hn_config, f, indent=2)
-        
-        print(f"Saved HN-LoRA HyperNetwork for Step {log_step} at: {hn_lora_checkpoint_dir}")
+        else:
+            (vla.module if hasattr(vla, 'module') else vla).save_pretrained(adapter_dir)
 
         # Save other components
         if cfg.use_proprio and proprio_projector is not None:
@@ -828,8 +754,23 @@ def save_hn_training_checkpoint(
                 (vla.module if hasattr(vla, 'module') else vla).vision_backbone.state_dict(), checkpoint_dir / f"vision_backbone--{checkpoint_name_suffix}"
             )
 
-    # Wait for model components to be saved (only in distributed mode)
-    if distributed_state.num_processes > 1:
+    # Wait for model components to be saved
+    dist.barrier()
+
+    # Merge LoRA weights into base model and save resulting model checkpoint
+    # Note: Can be very slow on some devices; if so, we recommend merging offline
+    if cfg.use_lora and not cfg.use_hn_lora and cfg.merge_lora_during_training:
+        base_vla = AutoModelForVision2Seq.from_pretrained(
+            cfg.vla_path, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True, trust_remote_code=True
+        )
+        merged_vla = PeftModel.from_pretrained(base_vla, adapter_dir)
+        merged_vla = merged_vla.merge_and_unload()
+
+        if distributed_state.is_main_process:
+            merged_vla.save_pretrained(checkpoint_dir)
+            print(f"Saved merged model for Step {log_step} at: {checkpoint_dir}")
+
+        # Wait for merged model to be saved
         dist.barrier()
 
 
@@ -1346,11 +1287,7 @@ def finetune(cfg: FinetuneConfig) -> None:
 
             # Save model checkpoint: either keep latest checkpoint only or all checkpoints
             if gradient_step_idx > 0 and log_step % cfg.save_freq == 0:
-                if cfg.use_hn_lora:
-                    save_func = save_hn_training_checkpoint
-                else:
-                    save_func = save_training_checkpoint
-                save_func(
+                save_training_checkpoint(
                     cfg=cfg,
                     run_dir=run_dir,
                     log_step=log_step,
