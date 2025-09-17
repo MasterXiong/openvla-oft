@@ -794,7 +794,19 @@ def save_hn_training_checkpoint(
         # Save HyperNetwork state dict
         hn_hypernet = (vla.module if hasattr(vla, 'module') else vla).hn_lora_hypernet
         torch.save(hn_hypernet.state_dict(), hn_lora_checkpoint_dir / "hypernet_state.pt")
-        
+
+        # Save layer_dims for evaluation (needed by HN-LoRA evaluation code)
+        layer_dims = {}
+        if hasattr(hn_hypernet, 'output_head_dim'):
+            # HN-LoRA v8/v9 uses grouped output heads
+            for layer_name, (in_dim, out_dim) in hn_hypernet.output_head_dim.items():
+                layer_dims[layer_name] = [in_dim, out_dim]
+
+        if layer_dims:
+            with open(hn_lora_checkpoint_dir / "layer_dims.json", "w") as f:
+                json.dump(layer_dims, f, indent=2)
+            print(f"  Saved layer_dims.json with {len(layer_dims)} layer groups")
+
         # Save HN-LoRA configuration
         hn_config = {
             "lora_rank": cfg.lora_rank,
