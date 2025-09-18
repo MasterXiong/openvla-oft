@@ -129,6 +129,11 @@ class HNLoRALinear(nn.Module):
     
     def set_lora_params(self, lora_A: torch.Tensor, lora_B: torch.Tensor):
         """Set the LoRA parameters for this layer"""
+        # Store with the same dtype as the weight matrix for compatibility
+        if lora_A is not None and self.weight is not None:
+            lora_A = lora_A.to(dtype=self.weight.dtype, device=self.weight.device)
+        if lora_B is not None and self.weight is not None:
+            lora_B = lora_B.to(dtype=self.weight.dtype, device=self.weight.device)
         self.lora_A = lora_A
         self.lora_B = lora_B
     
@@ -553,29 +558,175 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
     
     # Store original forward method
     original_forward = base_model.forward
-    
+
     # Create new forward method that uses HN-LoRA
+    # Track if this has been called
+    if not hasattr(base_model, '_hn_lora_call_count'):
+        base_model._hn_lora_call_count = 0
+
     def hn_lora_forward(*args, **kwargs):
-        # Extract input_ids
+        # Increment call counter
+        base_model._hn_lora_call_count += 1
+
+        # Print colorful message on first call
+        if base_model._hn_lora_call_count == 1:
+            print("\n" + "="*80)
+            print("\033[92m[SUCCESS] HN-LoRA Forward is being called!\033[0m")
+            print("\033[92m[CONFIRMED] This confirms the fix is working correctly!\033[0m")
+            print("="*80 + "\n")
+        elif base_model._hn_lora_call_count % 100 == 0:
+            print(f"\033[94m[UPDATE] HN-LoRA Forward called {base_model._hn_lora_call_count} times...\033[0m")
+
+        # Extract input_ids - handle both input_ids and inputs_embeds cases
         input_ids = kwargs.get('input_ids', args[0] if args else None)
-        
+        inputs_embeds = kwargs.get('inputs_embeds', None)
+
+        # Handle case where inputs_embeds is provided instead of input_ids (happens during generation with cache)
+        if input_ids is None and inputs_embeds is not None:
+            # During cached generation, we only have the last token's embedding
+            # We need to handle this case gracefully
+            if hasattr(base_model, '_debug_hn_lora') and base_model._debug_hn_lora:
+                print(f"\n[HN-LoRA Debug] Forward pass with inputs_embeds (cached generation):")
+                print(f"  - inputs_embeds shape: {inputs_embeds.shape}")
+                print(f"  - Using previously generated LoRA params")
+
+            # For cached generation, we don't regenerate LoRA params
+            # The params should already be set from the first forward pass
+            # Just call original forward
+            return original_forward(*args, **kwargs)
+
+        # Debug output
+        if hasattr(base_model, '_debug_hn_lora') and base_model._debug_hn_lora:
+            print(f"\n[HN-LoRA Debug] Forward pass:")
+            print(f"  - input_ids shape: {input_ids.shape if input_ids is not None else 'None'}")
+            if input_ids is not None and input_ids.numel() > 0:
+                print(f"  - input_ids first 10 tokens: {input_ids[0][:10].tolist() if input_ids.shape[1] >= 10 else input_ids[0].tolist()}")
+
         # Get instruction embeddings
         with torch.no_grad():
             instruction_embeds = embedding_layer(input_ids)
-        
+            # Ensure dtype matches the hypernet
+            if hasattr(base_model.hn_lora_hypernet, 'dtype'):
+                instruction_embeds = instruction_embeds.to(dtype=base_model.hn_lora_hypernet.dtype)
+            elif hasattr(base_model.hn_lora_hypernet, 'parameters'):
+                # Get dtype from first parameter
+                first_param = next(base_model.hn_lora_hypernet.parameters(), None)
+                if first_param is not None:
+                    instruction_embeds = instruction_embeds.to(dtype=first_param.dtype)
+
+        if hasattr(base_model, '_debug_hn_lora') and base_model._debug_hn_lora:
+            print(f"  - instruction_embeds shape: {instruction_embeds.shape}")
+            print(f"  - instruction_embeds dtype: {instruction_embeds.dtype}")
+            print(f"  - instruction_embeds mean: {instruction_embeds.mean().item():.6f}")
+            print(f"  - instruction_embeds std: {instruction_embeds.std().item():.6f}")
+
         # Generate LoRA parameters
         lora_params = base_model.hn_lora_hypernet(instruction_embeds)
-        
+
+        if hasattr(base_model, '_debug_hn_lora') and base_model._debug_hn_lora:
+            print(f"  - Generated {len(lora_params)} LoRA parameter pairs")
+            # Check first few LoRA parameters
+            for i, (lora_A, lora_B) in enumerate(lora_params[:3]):
+                print(f"    Layer {i}: lora_A norm={torch.norm(lora_A).item():.6f}, lora_B norm={torch.norm(lora_B).item():.6f}")
+
         # Set parameters in layers
         for layer, (lora_A, lora_B) in zip(base_model.hn_lora_layers, lora_params):
             layer.set_lora_params(lora_A, lora_B)
-        
+
         # Call original forward
         return original_forward(*args, **kwargs)
-    
+
     # Replace forward method
     base_model.forward = hn_lora_forward
-    
+    print(f"[HN-LoRA] Forward method replaced. Base model type: {type(base_model).__name__}")
+
+    # CRITICAL: Also wrap predict_action method since that's what evaluation actually calls
+    if hasattr(base_model, 'predict_action'):
+        original_predict_action = base_model.predict_action
+
+        def hn_lora_predict_action(
+            input_ids=None,
+            unnorm_key=None,
+            proprio=None,
+            proprio_projector=None,
+            action_head=None,
+            noisy_action_projector=None,
+            use_film=False,
+            **kwargs
+        ):
+            # Increment call counter
+            base_model._hn_lora_call_count += 1
+
+            # Print colorful message on first call
+            if base_model._hn_lora_call_count == 1:
+                print("\n" + "="*80)
+                print("\033[92m[SUCCESS] HN-LoRA predict_action is being called!\033[0m")
+                print("\033[92m[CONFIRMED] This confirms the fix is working correctly!\033[0m")
+                print("\033[92m[ACTIVE] HyperNetwork is now generating LoRA parameters!\033[0m")
+                print("="*80 + "\n")
+
+            # Print progress every call with different colors
+            if base_model._hn_lora_call_count <= 10:
+                # First 10 calls - show in purple
+                print(f"\033[95m[CALL] HN-LoRA call #{base_model._hn_lora_call_count}: Processing action prediction...\033[0m")
+            elif base_model._hn_lora_call_count % 50 == 0:
+                # Every 50 calls - show in blue
+                print(f"\033[94m[MILESTONE] HN-LoRA milestone: {base_model._hn_lora_call_count} predictions completed\033[0m")
+            elif base_model._hn_lora_call_count % 10 == 0:
+                # Every 10 calls - show in cyan
+                print(f"\033[96m[ACTIVE] HN-LoRA active: {base_model._hn_lora_call_count} calls\033[0m")
+
+            # Debug output
+            if hasattr(base_model, '_debug_hn_lora') and base_model._debug_hn_lora:
+                print(f"\n[HN-LoRA Debug] predict_action called:")
+                print(f"  - input_ids shape: {input_ids.shape if input_ids is not None else 'None'}")
+
+            # Get instruction embeddings from input_ids
+            if input_ids is not None:
+                with torch.no_grad():
+                    instruction_embeds = embedding_layer(input_ids)
+                    # Ensure dtype matches the hypernet
+                    if hasattr(base_model.hn_lora_hypernet, 'parameters'):
+                        first_param = next(base_model.hn_lora_hypernet.parameters(), None)
+                        if first_param is not None:
+                            instruction_embeds = instruction_embeds.to(dtype=first_param.dtype)
+
+                    if hasattr(base_model, '_debug_hn_lora') and base_model._debug_hn_lora:
+                        print(f"  - instruction_embeds shape: {instruction_embeds.shape}")
+                        print(f"  - instruction_embeds dtype: {instruction_embeds.dtype}")
+
+                    # Generate LoRA parameters
+                    lora_params = base_model.hn_lora_hypernet(instruction_embeds)
+
+                    # Always show LoRA parameter generation info for first few calls
+                    if base_model._hn_lora_call_count <= 5:
+                        print(f"\033[93m[GENERATED] {len(lora_params)} LoRA parameter pairs for {len(base_model.hn_lora_layers)} layers\033[0m")
+
+                    if hasattr(base_model, '_debug_hn_lora') and base_model._debug_hn_lora:
+                        print(f"  - Generated {len(lora_params)} LoRA parameter pairs")
+
+                    # Set parameters in layers
+                    for layer, (lora_A, lora_B) in zip(base_model.hn_lora_layers, lora_params):
+                        layer.set_lora_params(lora_A, lora_B)
+
+            # Call original predict_action
+            return original_predict_action(
+                input_ids=input_ids,
+                unnorm_key=unnorm_key,
+                proprio=proprio,
+                proprio_projector=proprio_projector,
+                action_head=action_head,
+                noisy_action_projector=noisy_action_projector,
+                use_film=use_film,
+                **kwargs
+            )
+
+        # Replace predict_action method
+        base_model.predict_action = hn_lora_predict_action
+        print(f"[HN-LoRA] predict_action method also wrapped for HN-LoRA")
+
+    print("\033[93m[WAITING] Waiting for first HN-LoRA call to verify it's working...\033[0m")
+
     # Add method to print trainable parameters
     def print_trainable_parameters():
         trainable = sum(p.numel() for p in base_model.hn_lora_hypernet.parameters() if p.requires_grad)
@@ -862,5 +1013,12 @@ def get_hn_lora_vla(cfg):
 
     _load_dataset_stats(vla, cfg.pretrained_checkpoint)
     vla.eval()
+
+    # Enable debug mode if requested
+    if hasattr(cfg, 'debug_hn_lora') and cfg.debug_hn_lora:
+        vla._debug_hn_lora = True
+        print("[HN-LoRA] Debug mode enabled")
+    else:
+        vla._debug_hn_lora = False
 
     return vla

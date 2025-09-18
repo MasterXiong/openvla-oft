@@ -46,6 +46,16 @@ class OpenVLA(PrismaticVLM):
 
         @return Unnormalized (continuous) action vector --> end-effector deltas.
         """
+        # Debug: Check if model has forward method
+        print("\n\033[96m[DEBUG predict_action] Starting VLA inference...\033[0m")
+        print(f"\033[96m  - Model type: {type(self).__name__}\033[0m")
+        print(f"\033[96m  - Has forward attr: {hasattr(self, 'forward')}\033[0m")
+        print(f"\033[96m  - Forward is: {type(self.forward) if hasattr(self, 'forward') else 'N/A'}\033[0m")
+
+        # Check if forward is our wrapped version
+        if hasattr(self, 'forward') and hasattr(self.forward, '__name__'):
+            print(f"\033[96m  - Forward method name: {self.forward.__name__}\033[0m")
+
         image_transform, tokenizer = self.vision_backbone.image_transform, self.llm_backbone.tokenizer
 
         # Build VLA Prompt
@@ -75,6 +85,10 @@ class OpenVLA(PrismaticVLM):
             raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
 
         # Invoke super().generate --> taps into `GenerationMixin` which (redirects) to `forward()`
+        print(f"\n\033[95m[DEBUG] About to call super().generate...\033[0m")
+        print(f"\033[95m  - Super class is: {PrismaticVLM.__name__}\033[0m")
+        print(f"\033[95m  - input_ids shape: {input_ids.shape}\033[0m")
+
         autocast_dtype = self.llm_backbone.half_precision_dtype
         with torch.autocast("cuda", dtype=autocast_dtype, enabled=self.enable_mixed_precision_training):
             # fmt: off
@@ -85,6 +99,8 @@ class OpenVLA(PrismaticVLM):
                 **kwargs
             )
             # fmt: on
+
+        print(f"\033[95m[DEBUG] Generated action tokens successfully!\033[0m")
 
         # Extract predicted action tokens and translate into (normalized) continuous actions
         predicted_action_token_ids = generated_ids[0, -self.get_action_dim(unnorm_key) :]
