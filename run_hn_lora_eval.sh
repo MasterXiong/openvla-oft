@@ -1,22 +1,20 @@
 #!/bin/bash
 # HN-LoRA Evaluation Script for LIBERO
 # Usage:
-#   Default: bash run_hn_lora_eval.sh [step] [task_suite] [gpu_id]
-#   Example: bash run_hn_lora_eval.sh 30 libero_spatial 7
+#   Default: bash run_hn_lora_eval.sh [task_suite] [gpu_id] [num_trials]
+#   Example: bash run_hn_lora_eval.sh libero_spatial 0 50
 #
-#   step: checkpoint step number (10, 20, 30, etc.) - default: 30
 #   task_suite: libero_spatial, libero_object, libero_goal, libero_10 - default: libero_spatial
-#   gpu_id: GPU ID to use - default: 7
+#   gpu_id: GPU ID to use - default: 0
+#   num_trials: Number of trials per task - default: 50
 
 # Parse command line arguments
-CHECKPOINT_STEP=${1:-30}
-TASK_SUITE=${2:-libero_spatial}
-GPU_ID=${3:-7}
-NUM_TRIALS=${4:-50}
+TASK_SUITE=${1:-libero_spatial}
+GPU_ID=${2:-0}
+NUM_TRIALS=${3:-50}
 
-# Define checkpoint base path
-CHECKPOINT_BASE="runs/20250916_144455+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu6_7"
-CHECKPOINT_PATH="${CHECKPOINT_BASE}/${CHECKPOINT_STEP}_chkpt"
+# Define checkpoint path - using your trained checkpoint
+CHECKPOINT_PATH="/homes/80/kang/zheng_openvla_oft/openvla-oft/runs/20250917_222219+openvla-7b+libero_spatial_no_noops+b1+lr-0.0005+hn_lora-r32--image_aug--hn_lora_v9_optimized_gpu7/10_chkpt"
 
 # Set environment variables
 export PYTHONPATH=/homes/80/kang/zheng_openvla_oft/openvla-oft:$PYTHONPATH
@@ -31,7 +29,6 @@ echo "HN-LoRA Evaluation for LIBERO"
 echo "========================================="
 echo ""
 echo "Evaluation Configuration:"
-echo "  - Checkpoint: Step ${CHECKPOINT_STEP}"
 echo "  - Task Suite: ${TASK_SUITE}"
 echo "  - GPU ID: ${GPU_ID}"
 echo "  - Trials per task: ${NUM_TRIALS}"
@@ -111,70 +108,57 @@ echo " Checkpoint setup complete"
 
 # Check for action_head and proprio_projector files
 echo "🔧 Checking for component files..."
-if [ ! -f "${CHECKPOINT_PATH}/action_head--${CHECKPOINT_STEP}_checkpoint.pt" ]; then
-    echo "Warning: action_head checkpoint not found for step ${CHECKPOINT_STEP}"
-    # Try to find the latest available checkpoint
-    for step in 20 10; do
-        if [ -f "${CHECKPOINT_BASE}/${step}_chkpt/action_head--${step}_checkpoint.pt" ]; then
-            echo "  - Using action_head from step ${step} as fallback"
-            cp "${CHECKPOINT_BASE}/${step}_chkpt/action_head--${step}_checkpoint.pt" \
-               "${CHECKPOINT_PATH}/action_head--${CHECKPOINT_STEP}_checkpoint.pt"
-            break
-        fi
-    done
+if [ ! -f "${CHECKPOINT_PATH}/action_head--10_checkpoint.pt" ] && [ ! -f "${CHECKPOINT_PATH}/action_head--latest_checkpoint.pt" ]; then
+    echo "Warning: action_head checkpoint not found"
 fi
 
-if [ ! -f "${CHECKPOINT_PATH}/proprio_projector--${CHECKPOINT_STEP}_checkpoint.pt" ]; then
-    echo "Warning: proprio_projector checkpoint not found for step ${CHECKPOINT_STEP}"
-    # Try to find the latest available checkpoint
-    for step in 20 10; do
-        if [ -f "${CHECKPOINT_BASE}/${step}_chkpt/proprio_projector--${step}_checkpoint.pt" ]; then
-            echo "  - Using proprio_projector from step ${step} as fallback"
-            cp "${CHECKPOINT_BASE}/${step}_chkpt/proprio_projector--${step}_checkpoint.pt" \
-               "${CHECKPOINT_PATH}/proprio_projector--${CHECKPOINT_STEP}_checkpoint.pt"
-            break
-        fi
-    done
+if [ ! -f "${CHECKPOINT_PATH}/proprio_projector--10_checkpoint.pt" ] && [ ! -f "${CHECKPOINT_PATH}/proprio_projector--latest_checkpoint.pt" ]; then
+    echo "Warning: proprio_projector checkpoint not found"
 fi
 
 echo ""
 
-# Check checkpoint type and validate
-if [ "$LORA_TYPE" == "hn_lora" ]; then
-    # Check if HN-LoRA checkpoint exists
-    if [ ! -d "${CHECKPOINT_PATH}/hn_lora_hypernet" ]; then
-        echo "Warning: This doesn't appear to be a HN-LoRA checkpoint"
-        echo "  Missing: ${CHECKPOINT_PATH}/hn_lora_hypernet"
-        echo ""
-        echo "Continue anyway? (y/n)"
-        read -r response
-        if [[ "$response" != "y" ]]; then
-            exit 1
-        fi
-    else
-        echo "HN-LoRA checkpoint detected"
+# Check HN-LoRA checkpoint
+if [ ! -d "${CHECKPOINT_PATH}/hn_lora_hypernet" ]; then
+    echo "⚠️  Warning: HN-LoRA checkpoint directory not found"
+    echo "  Missing: ${CHECKPOINT_PATH}/hn_lora_hypernet"
+    echo "  This checkpoint may not be properly configured for HN-LoRA evaluation"
+    echo ""
+    echo "Continue anyway? (y/n)"
+    read -r response
+    if [[ "$response" != "y" ]]; then
+        exit 1
     fi
 else
-    # For standard LoRA, check for lora_adapter directory or adapter files
-    if [ ! -d "${CHECKPOINT_PATH}/lora_adapter" ] && [ ! -f "${CHECKPOINT_PATH}/adapter_config.json" ]; then
-        echo "Warning: This doesn't appear to be a standard LoRA checkpoint"
-        echo "  Missing: ${CHECKPOINT_PATH}/lora_adapter or adapter_config.json"
-        echo ""
-        echo "Continue anyway? (y/n)"
-        read -r response
-        if [[ "$response" != "y" ]]; then
-            exit 1
-        fi
+    echo "✅ HN-LoRA checkpoint detected"
+    echo "  Found: ${CHECKPOINT_PATH}/hn_lora_hypernet/"
+
+    # Check for required HN-LoRA files
+    if [ -f "${CHECKPOINT_PATH}/hn_lora_hypernet/hypernet_state.pt" ]; then
+        echo "  ✓ hypernet_state.pt found"
     else
-        echo "Standard LoRA checkpoint detected"
+        echo "  ✗ hypernet_state.pt missing!"
+    fi
+
+    if [ -f "${CHECKPOINT_PATH}/hn_lora_hypernet/layer_dims.json" ]; then
+        echo "  ✓ layer_dims.json found"
+    else
+        echo "  ✗ layer_dims.json missing!"
+    fi
+
+    if [ -f "${CHECKPOINT_PATH}/hn_lora_hypernet/hn_lora_config.json" ]; then
+        echo "  ✓ hn_lora_config.json found"
+    else
+        echo "  ✗ hn_lora_config.json missing!"
     fi
 fi
 
 echo ""
-echo "🚀 Starting evaluation..."
-echo "Command: python experiments/robot/libero/run_libero_eval.py \\"
+echo "🚀 Starting HN-LoRA evaluation..."
+echo "Command: python experiments/robot/libero/run_libero_eval_hn_lora.py \\"
 echo "  --pretrained_checkpoint ${CHECKPOINT_PATH} \\"
 echo "  --task_suite_name ${TASK_SUITE} \\"
+echo "  --use_hn_lora True \\"
 echo "  --center_crop True \\"
 echo "  --lora_rank 32 \\"
 echo "  --num_trials_per_task ${NUM_TRIALS} \\"
@@ -187,9 +171,10 @@ echo "========================================="
 echo ""
 
 
-/homes/80/kang/anaconda3/envs/openvla-oft/bin/python experiments/robot/libero/run_libero_eval.py \
+/homes/80/kang/anaconda3/envs/openvla-oft/bin/python experiments/robot/libero/run_libero_eval_hn_lora.py \
     --pretrained_checkpoint ${CHECKPOINT_PATH} \
     --task_suite_name ${TASK_SUITE} \
+    --use_hn_lora True \
     --center_crop True \
     --lora_rank 32 \
     --num_trials_per_task ${NUM_TRIALS} \
