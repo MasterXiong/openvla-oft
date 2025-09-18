@@ -589,11 +589,15 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         if 'hn_instruction_text' in kwargs and kwargs['hn_instruction_text'] is not None and tokenizer is not None:
             text = kwargs['hn_instruction_text']
             if isinstance(text, str):
-                texts = [text]
+                # 完全模仿训练侧的处理
+                ids = tokenizer(text, add_special_tokens=True).input_ids  # 返回 list
+                ids = torch.tensor([ids], dtype=torch.long, device=base_model.device)  # 加 batch 维度 [1, seq_len]
             else:
+                # 批量处理（我觉得基本不会发生）
                 texts = list(text)
-            ids = tokenizer(texts, add_special_tokens=True, return_tensors='pt', padding=True).input_ids
-            ids = ids.to(device=base_model.device)
+                ids_list = [tokenizer(t, add_special_tokens=True).input_ids for t in texts]
+                ids = torch.tensor(ids_list, dtype=torch.long, device=base_model.device)
+
             if (hasattr(base_model, '_debug_hn_lora') and base_model._debug_hn_lora) or (os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1"):
                 print("\033[92m[HN][INSTRUCTION] Using hn_instruction_text for HyperNet conditioning\033[0m")
             return embedding_layer(ids)
