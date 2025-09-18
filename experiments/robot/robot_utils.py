@@ -12,6 +12,7 @@ from experiments.robot.openvla_utils import (
     get_vla,
     get_vla_action,
 )
+from experiments.robot.hn_lora_utils import get_hn_lora_vla
 
 # Initialize important constants
 ACTION_DIM = 7
@@ -66,7 +67,10 @@ def get_model(cfg: Any, wrap_diffusion_policy_for_droid: bool = False) -> torch.
         ValueError: If model family is not supported
     """
     if cfg.model_family == "openvla":
-        model = get_vla(cfg)
+        if cfg.use_hn_lora:
+            model = get_hn_lora_vla(cfg)
+        else:
+            model = get_vla(cfg)
     else:
         raise ValueError(f"Unsupported model family: {cfg.model_family}")
 

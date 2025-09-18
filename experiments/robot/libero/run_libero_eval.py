@@ -101,6 +101,9 @@ class GenerateConfig:
 
     lora_rank: int = 32                              # Rank of LoRA weight matrix (MAKE SURE THIS MATCHES TRAINING!)
 
+    # HyperLoRA
+    use_hn_lora: bool = False                        # Whether to use HyperLoRA
+
     unnorm_key: Union[str, Path] = ""                # Action un-normalization key
 
     load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
