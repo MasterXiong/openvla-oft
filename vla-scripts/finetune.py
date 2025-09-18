@@ -812,6 +812,24 @@ def run_validation(
     vla.eval()
     val_batches_count = 0
 
+    # Track HN-LoRA calls during validation
+    if cfg.use_hn_lora:
+        vla_unwrapped = vla.module if hasattr(vla, 'module') else vla
+        # Reset call counter for validation tracking
+        if hasattr(vla_unwrapped, '_hn_lora_call_count'):
+            initial_calls = vla_unwrapped._hn_lora_call_count
+            print(f"\n\033[93m[VAL START] HN-LoRA calls before validation: {initial_calls}\033[0m")
+        else:
+            initial_calls = 0
+            vla_unwrapped._hn_lora_call_count = 0
+            print(f"\n\033[93m[VAL START] Initializing HN-LoRA call counter for validation\033[0m")
+
+        # Check HN-LoRA status
+        if hasattr(vla_unwrapped, '_hn_lora_active'):
+            print(f"\033[92m[STATUS] HN-LoRA active: {vla_unwrapped._hn_lora_active}\033[0m")
+        if hasattr(vla_unwrapped, 'hn_lora_hypernet'):
+            print(f"\033[92m[HYPERNET] HyperNetwork loaded: {vla_unwrapped.hn_lora_hypernet is not None}\033[0m")
+
     # List to store validation metrics
     all_val_metrics = []
 
@@ -853,6 +871,19 @@ def run_validation(
 
     # Add batch count to metrics
     avg_val_metrics["val_batches_count"] = val_batches_count
+
+    # Report HN-LoRA calls during validation
+    if cfg.use_hn_lora:
+        vla_unwrapped = vla.module if hasattr(vla, 'module') else vla
+        if hasattr(vla_unwrapped, '_hn_lora_call_count'):
+            final_calls = vla_unwrapped._hn_lora_call_count
+            validation_calls = final_calls - initial_calls
+            print(f"\033[92m[VAL END] HN-LoRA calls during validation: {validation_calls}\033[0m")
+            print(f"\033[92m[ACTIVE] HN-LoRA active: {final_calls} total calls\033[0m")
+            if validation_calls == 0:
+                print(f"\033[91m[WARNING] No HN-LoRA calls during validation! Check if HN-LoRA is properly configured.\033[0m")
+            else:
+                print(f"\033[92m[CONFIRMED] HN-LoRA is working correctly during validation\033[0m")
 
     # Log validation metrics to W&B
     if distributed_state.is_main_process:

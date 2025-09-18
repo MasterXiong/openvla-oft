@@ -531,27 +531,40 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
     
     # Create new forward method that uses HN-LoRA
     def hn_lora_forward(*args, **kwargs):
+        # Increment call counter
+        base_model._hn_lora_call_count += 1
+
+        # Print debug messages for tracking
+        if base_model._hn_lora_call_count == 1:
+            print(f"\n\033[92m[FIRST CALL] HN-LoRA forward method called for the first time!\033[0m")
+        elif base_model._hn_lora_call_count % 100 == 0:
+            print(f"\033[94m[ACTIVE] HN-LoRA active: {base_model._hn_lora_call_count} calls\033[0m")
+
         # Extract input_ids
         input_ids = kwargs.get('input_ids', args[0] if args else None)
-        
+
         if input_ids is not None and embedding_layer is not None:
             # Get instruction embeddings
             with torch.no_grad():
                 instruction_embeds = embedding_layer(input_ids)
-            
+
             # Generate LoRA parameters
             lora_params = base_model.hn_lora_hypernet(instruction_embeds)
-            
+
             # Set parameters in layers
             for layer, (lora_A, lora_B) in zip(base_model.hn_lora_layers, lora_params):
                 layer.set_lora_params(lora_A, lora_B)
-        
+
         # Call original forward
         return original_forward(*args, **kwargs)
     
     # Replace forward method
     base_model.forward = hn_lora_forward
-    
+
+    # Initialize call counter for tracking HN-LoRA usage
+    base_model._hn_lora_call_count = 0
+    base_model._hn_lora_active = True
+
     # Add method to print trainable parameters
     def print_trainable_parameters():
         trainable = sum(p.numel() for p in base_model.hn_lora_hypernet.parameters() if p.requires_grad)
