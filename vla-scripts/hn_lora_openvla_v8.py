@@ -537,15 +537,39 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         if input_ids is not None and embedding_layer is not None:
             # Get instruction embeddings
             with torch.no_grad():
-                instruction_embeds = embedding_layer(input_ids)
-            
+                # ===== ORIGINAL CODE (PROBLEMATIC) - START =====
+                # This uses the full input_ids which includes both question AND answer during training
+                # Leading to inconsistent HyperNet conditioning between train/eval
+                # instruction_embeds = embedding_layer(input_ids)
+                # ===== ORIGINAL CODE (PROBLEMATIC) - END =====
+
+                # ===== FIXED CODE - START =====
+                # Use only the raw instruction for HyperNet conditioning
+                # This ensures train/eval consistency
+                if 'hn_input_ids' in kwargs and kwargs['hn_input_ids'] is not None:
+                    # hn_input_ids contains ONLY the raw instruction tokens
+                    # (e.g., "open the drawer" without the "In:...Out:" template or answers)
+                    hn_ids = kwargs['hn_input_ids']
+                    if not isinstance(hn_ids, torch.Tensor):
+                        hn_ids = torch.tensor(hn_ids, dtype=torch.long, device=input_ids.device)
+                    instruction_embeds = embedding_layer(hn_ids)
+                else:
+                    # Fallback to original behavior if hn_input_ids not provided
+                    # (for backward compatibility, though this path should not be used)
+                    instruction_embeds = embedding_layer(input_ids)
+                # ===== FIXED CODE - END =====
+
             # Generate LoRA parameters
             lora_params = base_model.hn_lora_hypernet(instruction_embeds)
             
             # Set parameters in layers
             for layer, (lora_A, lora_B) in zip(base_model.hn_lora_layers, lora_params):
                 layer.set_lora_params(lora_A, lora_B)
-        
+
+        # Remove HN-specific kwargs before calling original forward
+        # These are only for HyperNet and should not be passed to the base model
+        kwargs.pop('hn_input_ids', None)
+
         # Call original forward
         return original_forward(*args, **kwargs)
     
