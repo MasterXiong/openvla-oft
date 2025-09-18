@@ -75,7 +75,21 @@ class RLDSBatchTransform:
         if not self.predict_stop_token:
             labels[-1] = IGNORE_INDEX
 
-        return_dict = dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name, actions=actions)
+        # Build return dict
+        return_dict = dict(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            labels=labels,
+            dataset_name=dataset_name,
+            actions=actions,
+        )
+
+        # Provide raw-instruction tokens for HyperNet conditioning (alignment across train/eval)
+        try:
+            hn_ids = self.base_tokenizer(lang, add_special_tokens=True).input_ids
+            return_dict["hn_input_ids"] = torch.tensor(hn_ids)
+        except Exception:
+            pass
 
         # Debug: print prompt and input_ids format for training (first few only)
         try:
@@ -95,6 +109,12 @@ class RLDSBatchTransform:
                         last_tokens = input_ids[-24:]
                         print("\033[95m[TRAIN][PROMPT]", visible_prompt, "\033[0m")
                         print(f"\033[95m[TRAIN][TOKENS] len={len(input_ids)} first={first_tokens} last={last_tokens}\033[0m")
+
+                        # Extra: show human-only prompt tokenization vs full prompt (human+action)
+                        human_prompt = f"In: What action should the robot take to {lang}?\nOut: "
+                        human_ids = self.base_tokenizer(human_prompt, add_special_tokens=True).input_ids
+                        print(f"\033[95m[TRAIN][HUMAN_ONLY] len={len(human_ids)} first={human_ids[:12]} last={human_ids[-12:]}\033[0m")
+                        print(f"\033[95m[TRAIN][FULL_PROMPT] len={len(labels)} (includes action string + </s>)\033[0m")
         except Exception as e:
             # Never let debug printing break training
             print(f"\033[91m[TRAIN][DEBUG-ERROR] Failed to print prompt/tokens: {e}\033[0m")
