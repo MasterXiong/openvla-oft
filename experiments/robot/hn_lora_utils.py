@@ -786,7 +786,7 @@ def load_hn_lora_checkpoint(vla, path: str, device: str = "cpu") -> None:
     from pathlib import Path
     
     checkpoint_dir = Path(path)
-    hn_lora_dir = checkpoint_dir / "hn_lora_hypernet"
+    hn_lora_dir = checkpoint_dir / "hn_lora_adapter"
     
     # Load HyperNetwork state dict
     hypernet_state_path = hn_lora_dir / "hypernet_state.pt"
@@ -836,7 +836,7 @@ def get_hn_lora_vla(cfg):
     # Set number of images in VLA input
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
 
-    with open(f"{cfg.pretrained_checkpoint}/hn_lora_hypernet/hn_lora_config.json", "r") as f:
+    with open(f"{cfg.pretrained_checkpoint}/hn_lora_adapter/hn_lora_config.json", "r") as f:
         hn_config = json.load(f)
 
     hn_config = HNLoRAConfig(
