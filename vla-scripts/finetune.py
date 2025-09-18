@@ -74,7 +74,6 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 
 import os
-os.environ ["WANDB_API_KEY"] = "d687d003098a07858f49937d14c47adf893e9a5a"
 os.environ ["WANDB_MODE"] = "online"
 # os.environ["WANDB_BASE_URL"] = "https://api.wandb-cn.top"
 os.environ["WANDB_BASE_URL"] = "https://api.wandb.ai"
