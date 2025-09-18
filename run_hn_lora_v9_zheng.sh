@@ -1,0 +1,32 @@
+CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/finetune.py \
+    --vla_path openvla/openvla-7b \
+    --data_root_dir /homes/80/kang/modified_libero_rlds_new \
+    --dataset_name libero_goal_no_noops \
+    --run_root_dir finetune_saves/openvla-oft \
+    --use_l1_regression True \
+    --use_diffusion False \
+    --use_film False \
+    --num_images_in_input 1 \
+    --use_proprio False \
+    --batch_size 1 \
+    --grad_accumulation_steps 1 \
+    --learning_rate 5e-4 \
+    --num_steps_before_decay 100000 \
+    --max_steps 50005 \
+    --save_freq 100 \
+    --save_latest_checkpoint_only False \
+    --image_aug True \
+    --use_lora True \
+    --use_hn_lora True \
+    --lora_rank 4 \
+    --lora_alpha 0.001 \
+    --lora_dropout 0.0 \
+    --hn_context_dim 128 \
+    --hn_encoder_type transformer \
+    --hn_encoder_layers 4 \
+    --hn_encoder_heads 8 \
+    --hn_mlp_dim 256 \
+    --hn_embedding_dropout 0.0 \
+    --wandb_entity "zheng-xiong-University of Oxford" \
+    --wandb_project "openvla-oft-kang" \
+    --run_id_note hyperlora

@@ -152,4 +152,7 @@ data/
 rollouts/
 wandb/
 
-experiments/logs/
+experiments/logs
+
+
+finetune_saves/** 

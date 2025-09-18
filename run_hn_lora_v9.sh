@@ -7,7 +7,7 @@
 
 # Parse command line arguments
 NUM_GPUS=1
-CUDA_DEVICES="7"
+CUDA_DEVICES="0"
 BATCH_SIZE=1
 GRAD_ACCUM=1 # only for testing to be DELETED !!!
 # GRAD_ACCUM=64
@@ -80,7 +80,7 @@ CUDA_VISIBLE_DEVICES=$CUDA_DEVICES /homes/80/kang/anaconda3/envs/openvla-oft/bin
     --learning_rate 5e-4 \
     --num_steps_before_decay 100000 \
     --max_steps 150005 \
-    --save_freq 10000 \
+    --save_freq 100 \
     --save_latest_checkpoint_only False \
     --image_aug True \
     --use_lora True \
