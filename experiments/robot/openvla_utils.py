@@ -754,10 +754,40 @@ def get_vla_action(
         primary_image = all_images.pop(0)
 
         # Build VLA prompt
-        prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
+        if os.environ.get("OPENVLA_EVAL_PROMPT_NO_SPACE", "0") == "1":
+            prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut:"
+        else:
+            # Match training: there is a trailing space after 'Out: '
+            prompt = f"In: What action should the robot take to {task_label.lower()}?\nOut: "
+        # Debug: show prompt and tokens at evaluation time (first few only)
+        try:
+            if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+                if not hasattr(get_vla_action, "_debug_print_count"):
+                    get_vla_action._debug_print_count = 0  # type: ignore[attr-defined]
+                max_print = int(os.environ.get("OPENVLA_DEBUG_MAX", "3"))
+                if get_vla_action._debug_print_count < max_print:  # type: ignore[attr-defined]
+                    get_vla_action._debug_print_count += 1  # type: ignore[attr-defined]
+                    visible_prompt = prompt.replace(" ", "·").replace("\n", "\\n")
+                    print("\033[96m[EVAL][PROMPT]", visible_prompt, "\033[0m")
+        except Exception as e:
+            print(f"\033[91m[EVAL][DEBUG-ERROR] Failed to print prompt: {e}\033[0m")
 
         # Process primary image
         inputs = processor(prompt, primary_image).to(DEVICE, dtype=torch.bfloat16)
+        # Debug: print token ids stats
+        try:
+            if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1" and "input_ids" in inputs:
+                if not hasattr(get_vla_action, "_debug_tok_print_count"):
+                    get_vla_action._debug_tok_print_count = 0  # type: ignore[attr-defined]
+                max_print = int(os.environ.get("OPENVLA_DEBUG_MAX", "3"))
+                if get_vla_action._debug_tok_print_count < max_print:  # type: ignore[attr-defined]
+                    get_vla_action._debug_tok_print_count += 1  # type: ignore[attr-defined]
+                    input_ids = inputs["input_ids"].detach().cpu().tolist()[0]
+                    first_tokens = input_ids[:24]
+                    last_tokens = input_ids[-24:]
+                    print(f"\033[96m[EVAL][TOKENS] len={len(input_ids)} first={first_tokens} last={last_tokens}\033[0m")
+        except Exception as e:
+            print(f"\033[91m[EVAL][DEBUG-ERROR] Failed to print tokens: {e}\033[0m")
 
         # Process additional wrist images if any
         if all_images:

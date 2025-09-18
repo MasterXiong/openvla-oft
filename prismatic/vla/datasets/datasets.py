@@ -6,6 +6,7 @@ format to OpenVLA, IterableDataset shim.
 """
 
 from dataclasses import dataclass
+import os
 from pathlib import Path
 from typing import Any, Dict, Tuple, Type
 
@@ -60,7 +61,8 @@ class RLDSBatchTransform:
             prompt_builder.add_turn(turn["from"], turn["value"])
 
         # Tokenize (w/ `base_tokenizer`)
-        input_ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+        prompt_text = prompt_builder.get_prompt()
+        input_ids = self.base_tokenizer(prompt_text, add_special_tokens=True).input_ids
         labels = list(input_ids)
 
         # Tensorize =>> Run Image Transform to get `pixel_values` =>> Return
@@ -74,6 +76,28 @@ class RLDSBatchTransform:
             labels[-1] = IGNORE_INDEX
 
         return_dict = dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name, actions=actions)
+
+        # Debug: print prompt and input_ids format for training (first few only)
+        try:
+            if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+                # Print from main process only when distributed
+                rank = os.environ.get("LOCAL_RANK") or os.environ.get("RANK") or "0"
+                if rank == "0":
+                    max_print = int(os.environ.get("OPENVLA_DEBUG_MAX", "3"))
+                    if not hasattr(self, "_debug_print_count"):
+                        self._debug_print_count = 0  # type: ignore[attr-defined]
+                    if self._debug_print_count < max_print:  # type: ignore[attr-defined]
+                        self._debug_print_count += 1  # type: ignore[attr-defined]
+                        # Make whitespace visible
+                        visible_prompt = prompt_text.replace(" ", "·").replace("\n", "\\n")
+                        # Token preview
+                        first_tokens = input_ids[:24]
+                        last_tokens = input_ids[-24:]
+                        print("\033[95m[TRAIN][PROMPT]", visible_prompt, "\033[0m")
+                        print(f"\033[95m[TRAIN][TOKENS] len={len(input_ids)} first={first_tokens} last={last_tokens}\033[0m")
+        except Exception as e:
+            # Never let debug printing break training
+            print(f"\033[91m[TRAIN][DEBUG-ERROR] Failed to print prompt/tokens: {e}\033[0m")
 
         # Add additional inputs
         if self.use_wrist_image:
