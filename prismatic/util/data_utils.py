@@ -106,18 +106,28 @@ class PaddedCollatorForActionPrediction:
             dataset_names = [instance["dataset_name"] for instance in instances]
         else:
             dataset_names = None
+        # Optional HyperNet instruction ids
+        has_hn = "hn_input_ids" in instances[0]
+        if has_hn:
+            hn_input_ids_list = [instance["hn_input_ids"] for instance in instances]
 
         # For now, we only support Tokenizers with `padding_side = "right"` during training
         #   => Handle padding via RNN Utils => `pad_sequence`
         assert self.padding_side == "right", f"Invalid Tokenizer `{self.padding_side = }`"
         input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.pad_token_id)
         labels = pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
+        if has_hn:
+            hn_input_ids = pad_sequence(hn_input_ids_list, batch_first=True, padding_value=self.pad_token_id)
 
         # Truncate (if necessary)
         input_ids, labels = input_ids[:, : self.model_max_length], labels[:, : self.model_max_length]
+        if has_hn:
+            hn_input_ids = hn_input_ids[:, : self.model_max_length]
 
         # Get `attention_mask` by checking for `pad_token_id`
         attention_mask = input_ids.ne(self.pad_token_id)
+        if has_hn:
+            hn_attention_mask = hn_input_ids.ne(self.pad_token_id)
 
         # [Contract] For VLA Training =>> No "Unimodal" Data!
         assert all([pv is not None for pv in pixel_values]), "Invalid VLA Example with `pixel_values = None`!"
@@ -153,4 +163,7 @@ class PaddedCollatorForActionPrediction:
         )
         if dataset_names is not None:
             output["dataset_names"] = dataset_names
+        if has_hn:
+            output["hn_input_ids"] = hn_input_ids
+            output["hn_attention_mask"] = hn_attention_mask
         return output

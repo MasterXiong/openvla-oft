@@ -24,7 +24,7 @@ def get_openvla_prompt(instruction: str) -> str:
     if "v01" in MODEL_PATH:
         return f"{SYSTEM_PROMPT} USER: What action should the robot take to {instruction.lower()}? ASSISTANT:"
     else:
-        return f"In: What action should the robot take to {instruction.lower()}?\nOut:"
+        return f"In: What action should the robot take to {instruction.lower()}?\nOut: "
 
 
 @torch.inference_mode()

@@ -40,7 +40,7 @@ from prismatic.vla.constants import ACTION_DIM, ACTION_TOKEN_BEGIN_IDX, IGNORE_I
 
 
 def get_openvla_prompt(instruction: str, openvla_path: Union[str, Path]) -> str:
-    return f"In: What action should the robot take to {instruction.lower()}?\nOut:"
+    return f"In: What action should the robot take to {instruction.lower()}?\nOut: "
 
 
 # === Server Interface ===

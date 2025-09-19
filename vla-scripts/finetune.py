@@ -69,6 +69,17 @@ from prismatic.vla.constants import (
 from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 
+# Optional: Internal HN-LoRA that conditions only on raw instruction tokens
+try:
+    from experiments.robot.hn_lora_utils import (
+        apply_hn_lora_to_base_model as internal_apply_hn_lora,
+        HNLoRAConfig as InternalHNLoRAConfig,
+        load_hn_lora_checkpoint as internal_load_hn_lora_checkpoint,
+    )
+    INTERNAL_HN_LORA_AVAILABLE = True
+except Exception:
+    INTERNAL_HN_LORA_AVAILABLE = False
+
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
@@ -420,12 +431,30 @@ def run_forward_pass(
             noisy_action_projector=noisy_action_projector if use_diffusion else None,
             diffusion_timestep_embeddings=diffusion_timestep_embeddings if use_diffusion else None,
             use_film=use_film,
+            # Ensure HyperNet sees only raw instruction tokens (alignment across train/eval)
+            hn_input_ids=(batch.get("hn_input_ids").to(device_id) if isinstance(batch, dict) and ("hn_input_ids" in batch) else None),
         )
+
+    # Debug: show tokenization / mask stats each step (training)
+    if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+        try:
+            seq_len = int(batch["input_ids"].shape[-1])
+            lbl_len = int(batch["labels"].shape[-1])
+            print(f"\033[95m[TRAIN][IDS] seq_len={seq_len} labels_len={lbl_len}\033[0m")
+        except Exception:
+            pass
 
     # Get action masks needed for logging
     ground_truth_token_ids = batch["labels"][:, 1:].to(device_id)
     current_action_mask = get_current_action_mask(ground_truth_token_ids)
     next_actions_mask = get_next_actions_mask(ground_truth_token_ids)
+    if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+        try:
+            c_cnt = int(current_action_mask.sum())
+            n_cnt = int(next_actions_mask.sum())
+            print(f"\033[95m[TRAIN][MASK] curr={c_cnt} next={n_cnt}\033[0m")
+        except Exception:
+            pass
 
     # Compute metrics for discrete action representation (next-token prediction)
     if not (use_l1_regression or use_diffusion):
@@ -991,32 +1020,53 @@ def finetune(cfg: FinetuneConfig) -> None:
     if cfg.use_lora:
         if cfg.use_hn_lora:
             # Use HN-LoRA (HyperNetwork LoRA)
-            if not HN_LORA_AVAILABLE:
-                raise ImportError("HN-LoRA is not available. Please check the hn_lora_openvla_v2.py file exists in vla-scripts/")
-            print(f"Using HN-LoRA {HN_LORA_VERSION} (HyperNetwork LoRA) for task-conditioned adaptation")
-            hn_config = HNLoRAConfig(
-                lora_rank=cfg.lora_rank,
-                lora_alpha=cfg.lora_alpha,
-                lora_dropout=cfg.lora_dropout,
-                context_embedding_dim=cfg.hn_context_dim,
-                context_encoder_type=cfg.hn_encoder_type,
-                context_encoder_layers=cfg.hn_encoder_layers,
-                context_encoder_heads=cfg.hn_encoder_heads,
-                mlp_hidden_dim=cfg.hn_mlp_dim,
-                embedding_dropout=cfg.hn_embedding_dropout,
-            )
-            # Auto-detect model dimensions
-            if hasattr(vla, 'config'):
-                hn_config.hidden_size = getattr(vla.config, 'hidden_size', 
-                                               getattr(vla.config, 'd_model', 768))
-                hn_config.num_hidden_layers = getattr(vla.config, 'num_hidden_layers',
-                                                     getattr(vla.config, 'num_layers', 12))
-            vla = get_hn_lora_model(vla, hn_config)
-            
-            # Load HN-LoRA checkpoint if resuming
-            if cfg.resume:
-                load_hn_lora_checkpoint(vla, cfg.vla_path, cfg.resume_step, device=device_id)
-            
+            use_internal_hn = os.environ.get("OPENVLA_USE_INTERNAL_HN_LORA", "0") == "1"
+            if use_internal_hn:
+                assert INTERNAL_HN_LORA_AVAILABLE, "Internal HN-LoRA not available"
+                print("Using INTERNAL HN-LoRA (raw-instruction conditioning) for task-conditioned adaptation")
+                internal_hn_cfg = InternalHNLoRAConfig(
+                    lora_rank=cfg.lora_rank,
+                    lora_alpha=cfg.lora_alpha,
+                    lora_dropout=cfg.lora_dropout,
+                    context_embedding_dim=cfg.hn_context_dim,
+                    context_encoder_type=cfg.hn_encoder_type,
+                    context_encoder_layers=cfg.hn_encoder_layers,
+                    context_encoder_heads=cfg.hn_encoder_heads,
+                    mlp_hidden_dim=cfg.hn_mlp_dim,
+                    embedding_dropout=cfg.hn_embedding_dropout,
+                )
+                if hasattr(vla, 'config'):
+                    internal_hn_cfg.hidden_size = getattr(vla.config, 'hidden_size', getattr(vla.config, 'd_model', 768))
+                    internal_hn_cfg.num_hidden_layers = getattr(vla.config, 'num_hidden_layers', getattr(vla.config, 'num_layers', 12))
+                vla = internal_apply_hn_lora(vla, internal_hn_cfg)
+                if cfg.resume:
+                    internal_load_hn_lora_checkpoint(vla, cfg.vla_path, device=device_id)
+            else:
+                if not HN_LORA_AVAILABLE:
+                    raise ImportError("HN-LoRA is not available. Please check the hn_lora_openvla_v2.py file exists in vla-scripts/")
+                print(f"Using HN-LoRA {HN_LORA_VERSION} (HyperNetwork LoRA) for task-conditioned adaptation")
+                hn_config = HNLoRAConfig(
+                    lora_rank=cfg.lora_rank,
+                    lora_alpha=cfg.lora_alpha,
+                    lora_dropout=cfg.lora_dropout,
+                    context_embedding_dim=cfg.hn_context_dim,
+                    context_encoder_type=cfg.hn_encoder_type,
+                    context_encoder_layers=cfg.hn_encoder_layers,
+                    context_encoder_heads=cfg.hn_encoder_heads,
+                    mlp_hidden_dim=cfg.hn_mlp_dim,
+                    embedding_dropout=cfg.hn_embedding_dropout,
+                )
+                # Auto-detect model dimensions
+                if hasattr(vla, 'config'):
+                    hn_config.hidden_size = getattr(vla.config, 'hidden_size', 
+                                                   getattr(vla.config, 'd_model', 768))
+                    hn_config.num_hidden_layers = getattr(vla.config, 'num_hidden_layers',
+                                                         getattr(vla.config, 'num_layers', 12))
+                vla = get_hn_lora_model(vla, hn_config)
+                # Load HN-LoRA checkpoint if resuming
+                if cfg.resume:
+                    load_hn_lora_checkpoint(vla, cfg.vla_path, cfg.resume_step, device=device_id)
+
             # Print HN-LoRA summary if available
             if hasattr(vla, 'print_hn_lora_summary'):
                 vla.print_hn_lora_summary(show_lora_layers=False)

@@ -1,3 +1,4 @@
+OPENVLA_DEBUG_INPUT_IDS=${OPENVLA_DEBUG_INPUT_IDS:-1} OPENVLA_DEBUG_MAX=${OPENVLA_DEBUG_MAX:-1000000} \
 CUDA_VISIBLE_DEVICES=0 torchrun --standalone --nnodes 1 --nproc-per-node 1 vla-scripts/finetune.py \
     --vla_path openvla/openvla-7b \
     --data_root_dir /homes/80/kang/modified_libero_rlds_new \

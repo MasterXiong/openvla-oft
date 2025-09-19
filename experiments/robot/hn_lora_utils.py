@@ -22,6 +22,7 @@ except ImportError:
     print("torchinfo not available. Install with: pip install torchinfo")
 
 import time
+import os
 import json
 import datetime
 from collections import deque
@@ -564,6 +565,45 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
     if not hasattr(base_model, '_hn_lora_call_count'):
         base_model._hn_lora_call_count = 0
 
+    def _get_instruction_embeds_from_kwargs(kwargs):
+        # Prefer explicit HN inputs if provided
+        tokenizer = None
+        try:
+            tokenizer = base_model.llm_backbone.tokenizer if hasattr(base_model, 'llm_backbone') else None
+        except Exception:
+            tokenizer = None
+
+        if 'hn_input_ids' in kwargs and kwargs['hn_input_ids'] is not None:
+            hn_ids = kwargs['hn_input_ids']
+            if isinstance(hn_ids, (list, tuple)):
+                hn_ids = torch.tensor(hn_ids, dtype=torch.long, device=base_model.device)
+            elif isinstance(hn_ids, torch.Tensor):
+                hn_ids = hn_ids.to(device=base_model.device, dtype=torch.long)
+            else:
+                hn_ids = None
+            if hn_ids is not None:
+                if (hasattr(base_model, '_debug_hn_lora') and base_model._debug_hn_lora) or (os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1"):
+                    print("\033[92m[HN][INSTRUCTION] Using explicit hn_input_ids for HyperNet conditioning\033[0m")
+                return embedding_layer(hn_ids)
+
+        if 'hn_instruction_text' in kwargs and kwargs['hn_instruction_text'] is not None and tokenizer is not None:
+            text = kwargs['hn_instruction_text']
+            if isinstance(text, str):
+                # 完全模仿训练侧的处理
+                ids = tokenizer(text, add_special_tokens=True).input_ids  # 返回 list
+                ids = torch.tensor([ids], dtype=torch.long, device=base_model.device)  # 加 batch 维度 [1, seq_len]
+            else:
+                # 批量处理（我觉得基本不会发生）
+                texts = list(text)
+                ids_list = [tokenizer(t, add_special_tokens=True).input_ids for t in texts]
+                ids = torch.tensor(ids_list, dtype=torch.long, device=base_model.device)
+
+            if (hasattr(base_model, '_debug_hn_lora') and base_model._debug_hn_lora) or (os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1"):
+                print("\033[92m[HN][INSTRUCTION] Using hn_instruction_text for HyperNet conditioning\033[0m")
+            return embedding_layer(ids)
+
+        return None
+
     def hn_lora_forward(*args, **kwargs):
         # Increment call counter
         base_model._hn_lora_call_count += 1
@@ -602,9 +642,11 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
             if input_ids is not None and input_ids.numel() > 0:
                 print(f"  - input_ids first 10 tokens: {input_ids[0][:10].tolist() if input_ids.shape[1] >= 10 else input_ids[0].tolist()}")
 
-        # Get instruction embeddings
+        # Get instruction embeddings (prefer explicit HN inputs if provided)
         with torch.no_grad():
-            instruction_embeds = embedding_layer(input_ids)
+            instruction_embeds = _get_instruction_embeds_from_kwargs(kwargs)
+            if instruction_embeds is None:
+                instruction_embeds = embedding_layer(input_ids)
             # Ensure dtype matches the hypernet
             if hasattr(base_model.hn_lora_hypernet, 'dtype'):
                 instruction_embeds = instruction_embeds.to(dtype=base_model.hn_lora_hypernet.dtype)
@@ -633,6 +675,9 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         for layer, (lora_A, lora_B) in zip(base_model.hn_lora_layers, lora_params):
             layer.set_lora_params(lora_A, lora_B)
 
+        # Remove HN-only kwargs before calling original forward
+        kwargs.pop('hn_input_ids', None)
+        kwargs.pop('hn_instruction_text', None)
         # Call original forward
         return original_forward(*args, **kwargs)
 
@@ -681,10 +726,12 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
                 print(f"\n[HN-LoRA Debug] predict_action called:")
                 print(f"  - input_ids shape: {input_ids.shape if input_ids is not None else 'None'}")
 
-            # Get instruction embeddings from input_ids
-            if input_ids is not None:
+            # Get instruction embeddings (prefer explicit HN inputs if provided)
+            if input_ids is not None or 'hn_input_ids' in kwargs or 'hn_instruction_text' in kwargs:
                 with torch.no_grad():
-                    instruction_embeds = embedding_layer(input_ids)
+                    instruction_embeds = _get_instruction_embeds_from_kwargs(kwargs)
+                    if instruction_embeds is None:
+                        instruction_embeds = embedding_layer(input_ids)
                     # Ensure dtype matches the hypernet
                     if hasattr(base_model.hn_lora_hypernet, 'parameters'):
                         first_param = next(base_model.hn_lora_hypernet.parameters(), None)
@@ -709,6 +756,9 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
                     for layer, (lora_A, lora_B) in zip(base_model.hn_lora_layers, lora_params):
                         layer.set_lora_params(lora_A, lora_B)
 
+            # Remove HN-only kwargs before calling original predict_action
+            kwargs.pop('hn_input_ids', None)
+            kwargs.pop('hn_instruction_text', None)
             # Call original predict_action
             return original_predict_action(
                 input_ids=input_ids,

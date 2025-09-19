@@ -970,10 +970,21 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         """
         # If the special empty token ('') does not already appear after the colon (':') token in the prompt
         # (after "OUT:" or "ASSISTANT:"), insert it to match the inputs seen at training time
+        if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+            try:
+                last_tok = input_ids[:, -1].detach().cpu().tolist()[0]
+                print(f"\033[96m[EVAL][PRE_TOKENS] len={input_ids.shape[-1]} last={last_tok}\033[0m")
+            except Exception:
+                pass
         if not torch.all(input_ids[:, -1] == 29871):
             input_ids = torch.cat(
                 (input_ids, torch.unsqueeze(torch.Tensor([29871]).long(), dim=0).to(input_ids.device)), dim=1
             )
+            if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+                try:
+                    print("\033[96m[EVAL][APPEND] appended_empty_token=29871 new_len={}\033[0m".format(input_ids.shape[-1]))
+                except Exception:
+                    pass
 
         pixel_values = kwargs["pixel_values"]
         attention_mask = kwargs["attention_mask"]
@@ -984,16 +995,40 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
 
         # Get number of tokens in prompt (excluding the start token)
         NUM_PROMPT_TOKENS = input_ids.shape[-1] - 1  # Subtract action tokens and stop token
+        if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+            try:
+                print(f"\033[96m[EVAL][PROMPT_TOKENS] num_prompt_tokens={NUM_PROMPT_TOKENS}\033[0m")
+            except Exception:
+                pass
 
         # Prepare inputs by adding necessary tokens
+        before_len = input_ids.shape[-1]
         input_ids, attention_mask = self._prepare_input_for_action_prediction(input_ids, attention_mask)
+        if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+            try:
+                added = ACTION_DIM * NUM_ACTIONS_CHUNK
+                print(f"\033[96m[EVAL][PLACEHOLDER] added={added} stop={STOP_INDEX} new_len={input_ids.shape[-1]} (from {before_len})\033[0m")
+            except Exception:
+                pass
 
         # Update labels tensor for action mask computation later
         labels = self._prepare_labels_for_action_prediction(labels, input_ids)
+        if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+            try:
+                tail = labels.detach().cpu().tolist()[0][-10:]
+                print(f"\033[96m[EVAL][LABELS] len={labels.shape[-1]} tail={tail}\033[0m")
+            except Exception:
+                pass
 
         # Get input embeddings and action masks
         input_embeddings = self.get_input_embeddings()(input_ids)
         all_actions_mask = self._process_action_masks(labels)
+        if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+            try:
+                cnt = int(all_actions_mask.sum().item())
+                print(f"\033[96m[EVAL][MASK] action_token_positions={cnt}\033[0m")
+            except Exception:
+                pass
 
         # Extract language embeddings
         language_embeddings = input_embeddings[~all_actions_mask].reshape(
