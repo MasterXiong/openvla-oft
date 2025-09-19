@@ -223,8 +223,13 @@ class HyperNetwork(nn.Module):
         # for key, indices in self.dim_groups.items():
         #     print(f"  {key}: {len(indices)} layers - indices {indices[:3]}..." if len(indices) > 3 else f"  {key}: {len(indices)} layers - indices {indices}")
     
-    def forward(self, instruction_embeds: torch.Tensor) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-        """Generate LoRA parameters for all layers - optimized batch processing"""
+    def forward(self, instruction_embeds: torch.Tensor, attention_mask: torch.Tensor = None) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """Generate LoRA parameters for all layers - optimized batch processing
+
+        Args:
+            instruction_embeds: [batch_size, seq_len, embed_dim]
+            attention_mask: [batch_size, seq_len] - 1 for real tokens, 0 for padding
+        """
         batch_size = instruction_embeds.shape[0]
         device = instruction_embeds.device
         
@@ -239,21 +244,45 @@ class HyperNetwork(nn.Module):
             # Batch process all layers through Transformer encoder
             # Expand layer embeddings for batch
             layer_embeds_batch = all_layer_embeds.unsqueeze(0).expand(batch_size, -1, -1)  # (batch, num_layers, dim)
-            
+
             # Concatenate instruction context with all layer embeddings as a sequence
             combined = torch.cat([
                 instruction_context,  # (batch, seq_len, dim)
                 layer_embeds_batch   # (batch, num_layers, dim)
             ], dim=1)  # (batch, seq_len + num_layers, dim)
-            
-            # Single forward pass through Transformer encoder
-            encoded = self.context_encoder(combined)
-            
+
+            # 处理 attention mask
+            if attention_mask is not None:
+                # 扩展 mask 以匹配 concatenated sequence
+                # instruction_mask + all ones for layer embeddings (层嵌入始终需要关注)
+                layer_mask = torch.ones(batch_size, self.num_layers, device=device, dtype=attention_mask.dtype)
+                combined_mask = torch.cat([attention_mask, layer_mask], dim=1)  # (batch, seq_len + num_layers)
+                # 转换为 transformer 格式：0->True(mask), 1->False(attend)
+                # PyTorch TransformerEncoder expects True for positions to be masked
+                key_padding_mask = (combined_mask == 0)
+            else:
+                key_padding_mask = None
+
+            # Single forward pass through Transformer encoder with mask
+            encoded = self.context_encoder(combined, src_key_padding_mask=key_padding_mask)
+
             # Extract contexts for all layers
             layer_contexts = encoded[:, -self.num_layers:, :]  # (batch, num_layers, dim)
         else:  # MLP
             # For MLP, we can still batch process
-            instruction_pooled = instruction_context.mean(dim=1)  # (batch, dim)
+            # 如果有 mask，只对有效 tokens 做 pooling
+            if attention_mask is not None:
+                # 扩展 mask 以匹配 embedding 维度
+                mask_expanded = attention_mask.unsqueeze(-1).expand_as(instruction_context)  # (batch, seq_len, dim)
+                # 计算有效 tokens 的和
+                sum_embeddings = (instruction_context * mask_expanded).sum(dim=1)  # (batch, dim)
+                # 计算有效 tokens 的数量
+                sum_mask = mask_expanded.sum(dim=1).clamp(min=1e-7)  # (batch, dim) 避免除零
+                # 平均池化
+                instruction_pooled = sum_embeddings / sum_mask  # (batch, dim)
+            else:
+                instruction_pooled = instruction_context.mean(dim=1)  # (batch, dim)
+
             # Broadcast addition
             instruction_pooled_exp = instruction_pooled.unsqueeze(1).expand(-1, self.num_layers, -1)  # (batch, num_layers, dim)
             layer_embeds_batch = all_layer_embeds.unsqueeze(0).expand(batch_size, -1, -1)  # (batch, num_layers, dim)

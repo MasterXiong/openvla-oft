@@ -190,6 +190,8 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         # Get instruction embeddings (prefer explicit HN inputs if provided)
         with torch.no_grad():
             instruction_embeds = _get_instruction_embeds_from_kwargs(kwargs)
+            attention_mask = kwargs.get('hn_attention_mask', None)
+
             # Ensure dtype matches the hypernet
             if hasattr(base_model.hn_lora_hypernet, 'dtype'):
                 instruction_embeds = instruction_embeds.to(dtype=base_model.hn_lora_hypernet.dtype)
@@ -199,8 +201,11 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
                 if first_param is not None:
                     instruction_embeds = instruction_embeds.to(dtype=first_param.dtype)
 
-        # Generate LoRA parameters
-        lora_params = base_model.hn_lora_hypernet(instruction_embeds)
+        # Generate LoRA parameters with mask
+        if attention_mask is not None:
+            lora_params = base_model.hn_lora_hypernet(instruction_embeds, attention_mask)
+        else:
+            lora_params = base_model.hn_lora_hypernet(instruction_embeds)
 
         # Set parameters in layers
         for layer, (lora_A, lora_B) in zip(base_model.hn_lora_layers, lora_params):
@@ -209,6 +214,7 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         # Remove HN-only kwargs before calling original forward
         kwargs.pop('hn_input_ids', None)
         kwargs.pop('hn_instruction_text', None)
+        kwargs.pop('hn_attention_mask', None)
         # Call original forward
         return original_forward(**kwargs)
 
@@ -222,14 +228,19 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         # Get instruction embeddings (prefer explicit HN inputs if provided)
         with torch.no_grad():
             instruction_embeds = _get_instruction_embeds_from_kwargs(kwargs)
+            attention_mask = kwargs.get('hn_attention_mask', None)
+
             # Ensure dtype matches the hypernet
             if hasattr(base_model.hn_lora_hypernet, 'parameters'):
                 first_param = next(base_model.hn_lora_hypernet.parameters(), None)
                 if first_param is not None:
                     instruction_embeds = instruction_embeds.to(dtype=first_param.dtype)
 
-            # Generate LoRA parameters
-            lora_params = base_model.hn_lora_hypernet(instruction_embeds)
+            # Generate LoRA parameters with mask
+            if attention_mask is not None:
+                lora_params = base_model.hn_lora_hypernet(instruction_embeds, attention_mask)
+            else:
+                lora_params = base_model.hn_lora_hypernet(instruction_embeds)
 
             # Set parameters in layers
             for layer, (lora_A, lora_B) in zip(base_model.hn_lora_layers, lora_params):
@@ -238,6 +249,7 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         # Remove HN-only kwargs before calling original predict_action
         kwargs.pop('hn_input_ids', None)
         kwargs.pop('hn_instruction_text', None)
+        kwargs.pop('hn_attention_mask', None)
         # Call original predict_action
         return original_predict_action(**kwargs)
 
