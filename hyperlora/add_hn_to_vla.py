@@ -7,13 +7,18 @@ from .generated_lora_layer import HNLoRALinear
 from .hypernet import HyperNetwork
 
 
-def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
+def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig, processor=None):
     """
     Apply HN-LoRA directly to the base model by:
     1. Replacing target Linear layers with HNLoRALinear
     2. Adding HyperNetwork as a module to the base model
     3. Modifying the forward method to use HN-LoRA
     4. Returning the modified base model itself
+
+    Args:
+        base_model: The base VLA model
+        config: HN-LoRA configuration
+        processor: Optional processor containing tokenizer (for evaluation)
     """
     
     # Auto-detect dimensions
@@ -67,6 +72,10 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
     
     base_model.hn_lora_hypernet = hypernet
     base_model.hn_lora_layers = lora_layers
+
+    # Store processor if provided (for evaluation)
+    if processor is not None:
+        base_model._hn_processor = processor  # 使用 _hn_ 前缀避免覆盖原有的 processor
     
     # Find embedding layer
     embedding_layer = None
@@ -86,13 +95,37 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
 
     # Create new forward method that uses HN-LoRA
     def _get_instruction_embeds_from_kwargs(kwargs):
-        # Prefer explicit HN inputs if provided
-        tokenizer = None
-        try:
-            tokenizer = base_model.llm_backbone.tokenizer if hasattr(base_model, 'llm_backbone') else None
-        except Exception:
-            tokenizer = None
+        import os
 
+        # 修复 tokenizer 查找
+        tokenizer = None
+        tokenizer_source = None
+
+        # 优先级查找 tokenizer
+        # 1. 优先查找我们存储的 processor
+        if hasattr(base_model, '_hn_processor') and hasattr(base_model._hn_processor, 'tokenizer'):
+            tokenizer = base_model._hn_processor.tokenizer
+            tokenizer_source = "base_model._hn_processor.tokenizer (stored)"
+        # 2. 然后查找标准位置
+        elif hasattr(base_model, 'processor') and hasattr(base_model.processor, 'tokenizer'):
+            tokenizer = base_model.processor.tokenizer
+            tokenizer_source = "base_model.processor.tokenizer"
+        # 3. 最后查找 LLM backbone
+        elif hasattr(base_model, 'llm_backbone'):
+            llm = base_model.llm_backbone
+            if hasattr(llm, 'tokenizer'):
+                tokenizer = llm.tokenizer
+                tokenizer_source = "base_model.llm_backbone.tokenizer"
+            elif hasattr(llm, 'model') and hasattr(llm.model, 'tokenizer'):
+                tokenizer = llm.model.tokenizer
+                tokenizer_source = "base_model.llm_backbone.model.tokenizer"
+
+        # 打印 tokenizer 来源
+        if tokenizer is not None and os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+            print(f"\033[96m[HN][TOKENIZER] Found from: {tokenizer_source}\033[0m")
+            print(f"\033[96m[HN][TOKENIZER] Type: {type(tokenizer).__name__}\033[0m")
+
+        # 处理 hn_input_ids（训练传入的）
         if 'hn_input_ids' in kwargs and kwargs['hn_input_ids'] is not None:
             hn_ids = kwargs['hn_input_ids']
             if isinstance(hn_ids, (list, tuple)):
@@ -101,19 +134,69 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
                 hn_ids = hn_ids.to(device=base_model.device, dtype=torch.long)
             else:
                 raise ValueError("hn_input_ids must be a list, tuple, or torch.Tensor")
+
+            if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+                print(f"\033[92m[HN][INPUT] Using hn_input_ids, shape: {hn_ids.shape}\033[0m")
+
             return embedding_layer(hn_ids)
 
-        if 'hn_instruction_text' in kwargs and kwargs['hn_instruction_text'] is not None and tokenizer is not None:
+        # 处理 hn_instruction_text（评估传入的）
+        if 'hn_instruction_text' in kwargs and kwargs['hn_instruction_text'] is not None:
+            if tokenizer is None:
+                error_msg = (
+                    "\033[91m[HN][ERROR] Cannot process hn_instruction_text: tokenizer not found!\033[0m\n"
+                    "Tried: processor.tokenizer, llm_backbone.tokenizer, etc.\n"
+                )
+                # 添加诊断信息
+                if hasattr(base_model, 'processor'):
+                    error_msg += f"Processor type: {type(base_model.processor)}\n"
+                    error_msg += f"Processor attrs with 'token': {[a for a in dir(base_model.processor) if 'token' in a.lower()]}\n"
+                if hasattr(base_model, 'llm_backbone'):
+                    error_msg += f"LLM backbone type: {type(base_model.llm_backbone)}\n"
+                raise RuntimeError(error_msg)
+
+            from prismatic.vla.constants import MAX_INSTRUCTION_LENGTH
             text = kwargs['hn_instruction_text']
+
+            if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+                print(f"\033[92m[HN][TEXT] Processing: '{text[:50]}{'...' if len(text) > 50 else ''}'\033[0m")
+
+            # 使用固定长度 tokenization（与训练一致）
             if isinstance(text, str):
-                # 完全模仿训练侧的处理
-                ids = tokenizer(text, add_special_tokens=True).input_ids  # 返回 list
-                ids = torch.tensor([ids], dtype=torch.long, device=base_model.device)  # 加 batch 维度 [1, seq_len]
+                tokenized = tokenizer(
+                    text,
+                    add_special_tokens=True,
+                    max_length=MAX_INSTRUCTION_LENGTH,
+                    padding='max_length',
+                    truncation=True,
+                    return_tensors='pt',
+                    return_attention_mask=True
+                )
+                ids = tokenized.input_ids.to(device=base_model.device)
+                mask = tokenized.attention_mask.to(device=base_model.device)
+                kwargs['hn_attention_mask'] = mask
+
+                if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+                    print(f"\033[92m[HN][TOKENS] shape: {ids.shape}, mask sum: {mask.sum().item()}\033[0m")
             else:
-                # 批量处理（我觉得基本不会发生）
+                # 批量处理
                 texts = list(text)
-                ids_list = [tokenizer(t, add_special_tokens=True).input_ids for t in texts]
-                ids = torch.tensor(ids_list, dtype=torch.long, device=base_model.device)
+                tokenized = tokenizer(
+                    texts,
+                    add_special_tokens=True,
+                    max_length=MAX_INSTRUCTION_LENGTH,
+                    padding='max_length',
+                    truncation=True,
+                    return_tensors='pt',
+                    return_attention_mask=True
+                )
+                ids = tokenized.input_ids.to(device=base_model.device)
+                mask = tokenized.attention_mask.to(device=base_model.device)
+                kwargs['hn_attention_mask'] = mask
+
+                if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+                    print(f"\033[92m[HN][TOKENS] Batch size: {len(texts)}, shape: {ids.shape}\033[0m")
+
             return embedding_layer(ids)
 
         return None
@@ -122,6 +205,8 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         # Get instruction embeddings (prefer explicit HN inputs if provided)
         with torch.no_grad():
             instruction_embeds = _get_instruction_embeds_from_kwargs(kwargs)
+            attention_mask = kwargs.get('hn_attention_mask', None)
+
             # Ensure dtype matches the hypernet
             if hasattr(base_model.hn_lora_hypernet, 'dtype'):
                 instruction_embeds = instruction_embeds.to(dtype=base_model.hn_lora_hypernet.dtype)
@@ -131,8 +216,11 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
                 if first_param is not None:
                     instruction_embeds = instruction_embeds.to(dtype=first_param.dtype)
 
-        # Generate LoRA parameters
-        lora_params = base_model.hn_lora_hypernet(instruction_embeds)
+        # Generate LoRA parameters with mask
+        if attention_mask is not None:
+            lora_params = base_model.hn_lora_hypernet(instruction_embeds, attention_mask)
+        else:
+            lora_params = base_model.hn_lora_hypernet(instruction_embeds)
 
         # Set parameters in layers
         for layer, (lora_A, lora_B) in zip(base_model.hn_lora_layers, lora_params):
@@ -141,6 +229,7 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         # Remove HN-only kwargs before calling original forward
         kwargs.pop('hn_input_ids', None)
         kwargs.pop('hn_instruction_text', None)
+        kwargs.pop('hn_attention_mask', None)
         # Call original forward
         return original_forward(**kwargs)
 
@@ -154,14 +243,19 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         # Get instruction embeddings (prefer explicit HN inputs if provided)
         with torch.no_grad():
             instruction_embeds = _get_instruction_embeds_from_kwargs(kwargs)
+            attention_mask = kwargs.get('hn_attention_mask', None)
+
             # Ensure dtype matches the hypernet
             if hasattr(base_model.hn_lora_hypernet, 'parameters'):
                 first_param = next(base_model.hn_lora_hypernet.parameters(), None)
                 if first_param is not None:
                     instruction_embeds = instruction_embeds.to(dtype=first_param.dtype)
 
-            # Generate LoRA parameters
-            lora_params = base_model.hn_lora_hypernet(instruction_embeds)
+            # Generate LoRA parameters with mask
+            if attention_mask is not None:
+                lora_params = base_model.hn_lora_hypernet(instruction_embeds, attention_mask)
+            else:
+                lora_params = base_model.hn_lora_hypernet(instruction_embeds)
 
             # Set parameters in layers
             for layer, (lora_A, lora_B) in zip(base_model.hn_lora_layers, lora_params):
@@ -170,6 +264,7 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         # Remove HN-only kwargs before calling original predict_action
         kwargs.pop('hn_input_ids', None)
         kwargs.pop('hn_instruction_text', None)
+        kwargs.pop('hn_attention_mask', None)
         # Call original predict_action
         return original_predict_action(**kwargs)
 

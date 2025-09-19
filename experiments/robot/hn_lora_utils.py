@@ -83,6 +83,7 @@ def get_hn_lora_vla(cfg):
     check_model_logic_mismatch(pretrained_vla_path)
 
     # Load processor and VLA
+    processor = AutoProcessor.from_pretrained(pretrained_vla_path, trust_remote_code=True)
     vla = AutoModelForVision2Seq.from_pretrained(
         pretrained_vla_path,
         torch_dtype=torch.bfloat16,
@@ -113,7 +114,7 @@ def get_hn_lora_vla(cfg):
                                         getattr(vla.config, 'd_model', 768))
         hn_config.num_hidden_layers = getattr(vla.config, 'num_hidden_layers',
                                                 getattr(vla.config, 'num_layers', 12))
-    vla = apply_hn_lora_to_base_model(vla, hn_config)
+    vla = apply_hn_lora_to_base_model(vla, hn_config, processor=processor)
     
     load_hn_lora_checkpoint(vla, cfg.pretrained_checkpoint)
 

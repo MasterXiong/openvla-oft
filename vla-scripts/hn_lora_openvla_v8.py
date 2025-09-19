@@ -368,8 +368,13 @@ class HyperNetwork(nn.Module):
         # for key, indices in self.dim_groups.items():
         #     print(f"  {key}: {len(indices)} layers - indices {indices[:3]}..." if len(indices) > 3 else f"  {key}: {len(indices)} layers - indices {indices}")
     
-    def forward(self, instruction_embeds: torch.Tensor) -> List[Tuple[torch.Tensor, torch.Tensor]]:
-        """Generate LoRA parameters for all layers - optimized batch processing"""
+    def forward(self, instruction_embeds: torch.Tensor, attention_mask: torch.Tensor = None) -> List[Tuple[torch.Tensor, torch.Tensor]]:
+        """Generate LoRA parameters for all layers - optimized batch processing
+
+        Args:
+            instruction_embeds: [batch_size, seq_len, embed_dim]
+            attention_mask: [batch_size, seq_len] - 1 for real tokens, 0 for padding
+        """
         batch_size = instruction_embeds.shape[0]
         device = instruction_embeds.device
         
@@ -384,21 +389,45 @@ class HyperNetwork(nn.Module):
             # Batch process all layers through Transformer encoder
             # Expand layer embeddings for batch
             layer_embeds_batch = all_layer_embeds.unsqueeze(0).expand(batch_size, -1, -1)  # (batch, num_layers, dim)
-            
+
             # Concatenate instruction context with all layer embeddings as a sequence
             combined = torch.cat([
                 instruction_context,  # (batch, seq_len, dim)
                 layer_embeds_batch   # (batch, num_layers, dim)
             ], dim=1)  # (batch, seq_len + num_layers, dim)
-            
-            # Single forward pass through Transformer encoder
-            encoded = self.context_encoder(combined)
-            
+
+            # 处理 attention mask
+            if attention_mask is not None:
+                # 扩展 mask 以匹配 concatenated sequence
+                # instruction_mask + all ones for layer embeddings (层嵌入始终需要关注)
+                layer_mask = torch.ones(batch_size, self.num_layers, device=device, dtype=attention_mask.dtype)
+                combined_mask = torch.cat([attention_mask, layer_mask], dim=1)  # (batch, seq_len + num_layers)
+                # 转换为 transformer 格式：0->True(mask), 1->False(attend)
+                # PyTorch TransformerEncoder expects True for positions to be masked
+                key_padding_mask = (combined_mask == 0)
+            else:
+                key_padding_mask = None
+
+            # Single forward pass through Transformer encoder with mask
+            encoded = self.context_encoder(combined, src_key_padding_mask=key_padding_mask)
+
             # Extract contexts for all layers
             layer_contexts = encoded[:, -self.num_layers:, :]  # (batch, num_layers, dim)
         else:  # MLP
             # For MLP, we can still batch process
-            instruction_pooled = instruction_context.mean(dim=1)  # (batch, dim)
+            # 如果有 mask，只对有效 tokens 做 pooling
+            if attention_mask is not None:
+                # 扩展 mask 以匹配 embedding 维度
+                mask_expanded = attention_mask.unsqueeze(-1).expand_as(instruction_context)  # (batch, seq_len, dim)
+                # 计算有效 tokens 的和
+                sum_embeddings = (instruction_context * mask_expanded).sum(dim=1)  # (batch, dim)
+                # 计算有效 tokens 的数量
+                sum_mask = mask_expanded.sum(dim=1).clamp(min=1e-7)  # (batch, dim) 避免除零
+                # 平均池化
+                instruction_pooled = sum_embeddings / sum_mask  # (batch, dim)
+            else:
+                instruction_pooled = instruction_context.mean(dim=1)  # (batch, dim)
+
             # Broadcast addition
             instruction_pooled_exp = instruction_pooled.unsqueeze(1).expand(-1, self.num_layers, -1)  # (batch, num_layers, dim)
             layer_embeds_batch = all_layer_embeds.unsqueeze(0).expand(batch_size, -1, -1)  # (batch, num_layers, dim)
@@ -553,14 +582,23 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
                     if not isinstance(hn_ids, torch.Tensor):
                         hn_ids = torch.tensor(hn_ids, dtype=torch.long, device=input_ids.device)
                     instruction_embeds = embedding_layer(hn_ids)
+
+                    # Get attention mask if available
+                    attention_mask = kwargs.get('hn_attention_mask', None)
+                    if attention_mask is not None and not isinstance(attention_mask, torch.Tensor):
+                        attention_mask = torch.tensor(attention_mask, dtype=torch.long, device=input_ids.device)
                 else:
                     # Fallback to original behavior if hn_input_ids not provided
                     # (for backward compatibility, though this path should not be used)
                     instruction_embeds = embedding_layer(input_ids)
+                    attention_mask = None
                 # ===== FIXED CODE - END =====
 
-            # Generate LoRA parameters
-            lora_params = base_model.hn_lora_hypernet(instruction_embeds)
+            # Generate LoRA parameters with mask
+            if attention_mask is not None:
+                lora_params = base_model.hn_lora_hypernet(instruction_embeds, attention_mask)
+            else:
+                lora_params = base_model.hn_lora_hypernet(instruction_embeds)
             
             # Set parameters in layers
             for layer, (lora_A, lora_B) in zip(base_model.hn_lora_layers, lora_params):
@@ -569,6 +607,7 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         # Remove HN-specific kwargs before calling original forward
         # These are only for HyperNet and should not be passed to the base model
         kwargs.pop('hn_input_ids', None)
+        kwargs.pop('hn_attention_mask', None)
 
         # Call original forward
         return original_forward(*args, **kwargs)
