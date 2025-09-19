@@ -86,9 +86,33 @@ class RLDSBatchTransform:
 
         # Provide raw-instruction tokens for HyperNet conditioning (alignment across train/eval)
         try:
-            hn_ids = self.base_tokenizer(lang, add_special_tokens=True).input_ids
-            return_dict["hn_input_ids"] = torch.tensor(hn_ids)
-        except Exception:
+            from prismatic.vla.constants import MAX_INSTRUCTION_LENGTH
+
+            # 使用固定长度 padding，确保训练和评估一致
+            tokenized = self.base_tokenizer(
+                lang,
+                add_special_tokens=True,
+                max_length=MAX_INSTRUCTION_LENGTH,
+                padding='max_length',
+                truncation=True,
+                return_tensors='pt',
+                return_attention_mask=True
+            )
+
+            # tokenized.input_ids 形状: [1, MAX_INSTRUCTION_LENGTH]
+            # tokenized.attention_mask 形状: [1, MAX_INSTRUCTION_LENGTH]
+            return_dict["hn_input_ids"] = tokenized.input_ids.squeeze(0)
+            return_dict["hn_attention_mask"] = tokenized.attention_mask.squeeze(0)
+
+            # 调试打印
+            if os.environ.get("OPENVLA_DEBUG_INPUT_IDS", "0") == "1":
+                if not hasattr(self, "_hn_debug_count"):
+                    self._hn_debug_count = 0
+                if self._hn_debug_count < 3:
+                    self._hn_debug_count += 1
+                    print(f"\033[95m[TRAIN][HN_IDS] shape: {tokenized.input_ids.shape}, mask sum: {tokenized.attention_mask.sum().item()}\033[0m")
+        except Exception as e:
+            print(f"Warning: Failed to generate hn_input_ids: {e}")
             pass
 
         # Debug: print prompt and input_ids format for training (first few only)

@@ -77,6 +77,9 @@ ACTION_DIM = constants["ACTION_DIM"]
 PROPRIO_DIM = constants["PROPRIO_DIM"]
 ACTION_PROPRIO_NORMALIZATION_TYPE = constants["ACTION_PROPRIO_NORMALIZATION_TYPE"]
 
+# HyperNet instruction tokenization parameters
+MAX_INSTRUCTION_LENGTH = 64  # 统一的指令最大长度，足够覆盖大部分指令
+
 # Print which robot platform constants are being used (for debugging)
 print(f"Using {ROBOT_PLATFORM} constants:")
 print(f"  NUM_ACTIONS_CHUNK = {NUM_ACTIONS_CHUNK}")
