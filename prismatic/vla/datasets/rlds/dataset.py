@@ -231,11 +231,11 @@ def make_dataset_from_rlds(
         dataset_statistics["action"]["mask"] = np.array(action_normalization_mask)
 
     # construct the dataset
-    # split = "train" if train else "val"
-    if "val" not in builder.info.splits:
-        split = "train[:95%]" if train else "train[95%:]"
-    else:
-        split = "train" if train else "val"
+    split = "train" if train else "val"
+    # if "val" not in builder.info.splits:
+    #     split = "train[:95%]" if train else "train[95%:]"
+    # else:
+    #     split = "train" if train else "val"
 
     dataset = dl.DLataset.from_rlds(builder, split=split, shuffle=shuffle, num_parallel_reads=num_parallel_reads)
 
