@@ -482,17 +482,6 @@ def eval_libero(cfg: GenerateConfig) -> float:
     # Initialize model and components
     model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
 
-    # Print HN-LoRA status at start
-    if cfg.use_hn_lora:
-        print("\n" + "="*80)
-        print("\033[94m[START] Starting evaluation with HN-LoRA enabled\033[0m")
-        print("\033[94m[CHECKPOINT] HN-LoRA checkpoint: {}\033[0m".format(cfg.pretrained_checkpoint))
-        if hasattr(model, 'hn_lora_layers'):
-            print("\033[94m[CONFIG] HN-LoRA layers configured: {}\033[0m".format(len(model.hn_lora_layers)))
-        if hasattr(model, 'hn_lora_hypernet'):
-            print("\033[94m[LOADED] HyperNetwork loaded successfully\033[0m")
-        print("="*80 + "\n")
-
     # Get expected image dimensions
     resize_size = get_image_resize_size(cfg)
 
@@ -546,17 +535,6 @@ def eval_libero(cfg: GenerateConfig) -> float:
     # Close log file
     if log_file:
         log_file.close()
-
-    # Print HN-LoRA usage summary if applicable
-    if cfg.use_hn_lora and hasattr(model, '_hn_lora_call_count'):
-        print("\n" + "="*80)
-        if model._hn_lora_call_count > 0:
-            print(f"\033[92m[SUCCESS] HN-LoRA Summary: Forward was called {model._hn_lora_call_count} times during evaluation!\033[0m")
-            print("\033[92m[CONFIRMED] The HN-LoRA fix is working correctly!\033[0m")
-        else:
-            print("\033[91m[ERROR] WARNING: HN-LoRA Forward was never called during evaluation!\033[0m")
-            print("\033[91m[DEBUG] This indicates a problem with the HN-LoRA integration.\033[0m")
-        print("="*80 + "\n")
 
     return final_success_rate
 

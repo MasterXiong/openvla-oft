@@ -814,7 +814,7 @@ def get_vla_action(
                 **inputs,
                 unnorm_key=cfg.unnorm_key,
                 do_sample=False,
-                hn_instruction_text=task_label,  # Ensure HyperNet uses raw instruction only
+                hn_instruction_text=task_label.lower(),  # Ensure HyperNet uses raw instruction only
             )
         else:
             # Custom action head for continuous actions
@@ -827,7 +827,7 @@ def get_vla_action(
                 noisy_action_projector=noisy_action_projector,
                 action_head=action_head,
                 use_film=use_film,
-                hn_instruction_text=task_label,  # Ensure HyperNet uses raw instruction only
+                hn_instruction_text=task_label.lower(),  # Ensure HyperNet uses raw instruction only
             )
 
     # Return action chunk as list of actions

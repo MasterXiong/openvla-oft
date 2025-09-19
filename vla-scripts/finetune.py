@@ -21,11 +21,6 @@ import tqdm
 from accelerate import PartialState
 from huggingface_hub import HfApi, snapshot_download
 from peft import LoraConfig, PeftModel, get_peft_model
-# HN-LoRA imports - support multiple versions
-HN_LORA_AVAILABLE = False
-HN_LORA_VERSION = None
-get_hn_lora_model = None
-HNLoRAConfig = None
 
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim import AdamW
@@ -69,16 +64,8 @@ from prismatic.vla.constants import (
 from prismatic.vla.datasets import RLDSBatchTransform, RLDSDataset
 from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 
-# Optional: Internal HN-LoRA that conditions only on raw instruction tokens
-try:
-    from experiments.robot.hn_lora_utils import (
-        apply_hn_lora_to_base_model as internal_apply_hn_lora,
-        HNLoRAConfig as InternalHNLoRAConfig,
-        load_hn_lora_checkpoint as internal_load_hn_lora_checkpoint,
-    )
-    INTERNAL_HN_LORA_AVAILABLE = True
-except Exception:
-    INTERNAL_HN_LORA_AVAILABLE = False
+from hyperlora.config import HNLoRAConfig
+from hyperlora.add_hn_to_vla import apply_hn_lora_to_base_model
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -907,37 +894,6 @@ def finetune(cfg: FinetuneConfig) -> None:
     assert not (cfg.use_l1_regression and cfg.use_diffusion), (
         "Cannot do both L1 regression and diffusion. Please pick one of them!"
     )
-    
-    # Import HN-LoRA version if needed
-    global HN_LORA_AVAILABLE, HN_LORA_VERSION, get_hn_lora_model, HNLoRAConfig
-    if cfg.use_hn_lora:
-        if cfg.hn_lora_version == "v10_extreme":
-            try:
-                from hn_lora_openvla_v10_extreme import get_hn_lora_model, HNLoRAConfig
-                HN_LORA_AVAILABLE = True
-                HN_LORA_VERSION = "v10_extreme"
-                print("Using HN-LoRA v10 EXTREME (ultra-optimized for speed)")
-            except ImportError as e:
-                print(f"Error importing HN-LoRA v10_extreme: {e}")
-                raise ImportError("HN-LoRA v10_extreme is not available. Please check the hn_lora_openvla_v10_extreme.py file exists in vla-scripts/")
-        elif cfg.hn_lora_version == "v9_optimized":
-            try:
-                from hn_lora_openvla_v9_optimized import get_hn_lora_model_v9 as get_hn_lora_model, HNLoRAConfig
-                HN_LORA_AVAILABLE = True
-                HN_LORA_VERSION = "v9_optimized"
-                print("Using HN-LoRA v9 Optimized (vmap + torch.compile)")
-            except ImportError as e:
-                print(f"Error importing HN-LoRA v9_optimized: {e}")
-                raise ImportError("HN-LoRA v9_optimized is not available. Please check the hn_lora_openvla_v9_optimized.py file exists in vla-scripts/")
-        else:  # Default to v8
-            try:
-                from hn_lora_openvla_v8 import get_hn_lora_model, HNLoRAConfig
-                HN_LORA_AVAILABLE = True
-                HN_LORA_VERSION = "v8"
-                print("Using HN-LoRA v8 (grouped shared output heads)")
-            except ImportError as e:
-                print(f"Error importing HN-LoRA v8: {e}")
-                raise ImportError("HN-LoRA v8 is not available. Please check the hn_lora_openvla_v8.py file exists in vla-scripts/")
 
     # Trim trailing forward slash ('/') in VLA path if it exists
     cfg.vla_path = cfg.vla_path.rstrip("/")
@@ -1019,53 +975,27 @@ def finetune(cfg: FinetuneConfig) -> None:
     # LoRA setup
     if cfg.use_lora:
         if cfg.use_hn_lora:
-            # Use HN-LoRA (HyperNetwork LoRA)
-            use_internal_hn = os.environ.get("OPENVLA_USE_INTERNAL_HN_LORA", "0") == "1"
-            if use_internal_hn:
-                assert INTERNAL_HN_LORA_AVAILABLE, "Internal HN-LoRA not available"
-                print("Using INTERNAL HN-LoRA (raw-instruction conditioning) for task-conditioned adaptation")
-                internal_hn_cfg = InternalHNLoRAConfig(
-                    lora_rank=cfg.lora_rank,
-                    lora_alpha=cfg.lora_alpha,
-                    lora_dropout=cfg.lora_dropout,
-                    context_embedding_dim=cfg.hn_context_dim,
-                    context_encoder_type=cfg.hn_encoder_type,
-                    context_encoder_layers=cfg.hn_encoder_layers,
-                    context_encoder_heads=cfg.hn_encoder_heads,
-                    mlp_hidden_dim=cfg.hn_mlp_dim,
-                    embedding_dropout=cfg.hn_embedding_dropout,
-                )
-                if hasattr(vla, 'config'):
-                    internal_hn_cfg.hidden_size = getattr(vla.config, 'hidden_size', getattr(vla.config, 'd_model', 768))
-                    internal_hn_cfg.num_hidden_layers = getattr(vla.config, 'num_hidden_layers', getattr(vla.config, 'num_layers', 12))
-                vla = internal_apply_hn_lora(vla, internal_hn_cfg)
-                if cfg.resume:
-                    internal_load_hn_lora_checkpoint(vla, cfg.vla_path, device=device_id)
-            else:
-                if not HN_LORA_AVAILABLE:
-                    raise ImportError("HN-LoRA is not available. Please check the hn_lora_openvla_v2.py file exists in vla-scripts/")
-                print(f"Using HN-LoRA {HN_LORA_VERSION} (HyperNetwork LoRA) for task-conditioned adaptation")
-                hn_config = HNLoRAConfig(
-                    lora_rank=cfg.lora_rank,
-                    lora_alpha=cfg.lora_alpha,
-                    lora_dropout=cfg.lora_dropout,
-                    context_embedding_dim=cfg.hn_context_dim,
-                    context_encoder_type=cfg.hn_encoder_type,
-                    context_encoder_layers=cfg.hn_encoder_layers,
-                    context_encoder_heads=cfg.hn_encoder_heads,
-                    mlp_hidden_dim=cfg.hn_mlp_dim,
-                    embedding_dropout=cfg.hn_embedding_dropout,
-                )
-                # Auto-detect model dimensions
-                if hasattr(vla, 'config'):
-                    hn_config.hidden_size = getattr(vla.config, 'hidden_size', 
-                                                   getattr(vla.config, 'd_model', 768))
-                    hn_config.num_hidden_layers = getattr(vla.config, 'num_hidden_layers',
-                                                         getattr(vla.config, 'num_layers', 12))
-                vla = get_hn_lora_model(vla, hn_config)
-                # Load HN-LoRA checkpoint if resuming
-                if cfg.resume:
-                    load_hn_lora_checkpoint(vla, cfg.vla_path, cfg.resume_step, device=device_id)
+            hn_config = HNLoRAConfig(
+                lora_rank=cfg.lora_rank,
+                lora_alpha=cfg.lora_alpha,
+                lora_dropout=cfg.lora_dropout,
+                context_embedding_dim=cfg.hn_context_dim,
+                context_encoder_type=cfg.hn_encoder_type,
+                context_encoder_layers=cfg.hn_encoder_layers,
+                context_encoder_heads=cfg.hn_encoder_heads,
+                mlp_hidden_dim=cfg.hn_mlp_dim,
+                embedding_dropout=cfg.hn_embedding_dropout,
+            )
+            # Auto-detect model dimensions
+            if hasattr(vla, 'config'):
+                hn_config.hidden_size = getattr(vla.config, 'hidden_size', 
+                                                getattr(vla.config, 'd_model', 768))
+                hn_config.num_hidden_layers = getattr(vla.config, 'num_hidden_layers',
+                                                        getattr(vla.config, 'num_layers', 12))
+            vla = apply_hn_lora_to_base_model(vla, hn_config)
+            # Load HN-LoRA checkpoint if resuming
+            if cfg.resume:
+                load_hn_lora_checkpoint(vla, cfg.vla_path, cfg.resume_step, device=device_id)
 
             # Print HN-LoRA summary if available
             if hasattr(vla, 'print_hn_lora_summary'):
