@@ -7,13 +7,18 @@ from .generated_lora_layer import HNLoRALinear
 from .hypernet import HyperNetwork
 
 
-def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
+def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig, processor=None):
     """
     Apply HN-LoRA directly to the base model by:
     1. Replacing target Linear layers with HNLoRALinear
     2. Adding HyperNetwork as a module to the base model
     3. Modifying the forward method to use HN-LoRA
     4. Returning the modified base model itself
+
+    Args:
+        base_model: The base VLA model
+        config: HN-LoRA configuration
+        processor: Optional processor containing tokenizer (for evaluation)
     """
     
     # Auto-detect dimensions
@@ -67,6 +72,10 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
     
     base_model.hn_lora_hypernet = hypernet
     base_model.hn_lora_layers = lora_layers
+
+    # Store processor if provided (for evaluation)
+    if processor is not None:
+        base_model._hn_processor = processor  # 使用 _hn_ 前缀避免覆盖原有的 processor
     
     # Find embedding layer
     embedding_layer = None
@@ -93,9 +102,15 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
         tokenizer_source = None
 
         # 优先级查找 tokenizer
-        if hasattr(base_model, 'processor') and hasattr(base_model.processor, 'tokenizer'):
+        # 1. 优先查找我们存储的 processor
+        if hasattr(base_model, '_hn_processor') and hasattr(base_model._hn_processor, 'tokenizer'):
+            tokenizer = base_model._hn_processor.tokenizer
+            tokenizer_source = "base_model._hn_processor.tokenizer (stored)"
+        # 2. 然后查找标准位置
+        elif hasattr(base_model, 'processor') and hasattr(base_model.processor, 'tokenizer'):
             tokenizer = base_model.processor.tokenizer
             tokenizer_source = "base_model.processor.tokenizer"
+        # 3. 最后查找 LLM backbone
         elif hasattr(base_model, 'llm_backbone'):
             llm = base_model.llm_backbone
             if hasattr(llm, 'tokenizer'):
