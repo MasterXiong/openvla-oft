@@ -64,11 +64,14 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig, processor=None
     
     # Create and attach HyperNetwork
     hypernet = HyperNetwork(config, layer_dims)
-    
-    # Move HyperNetwork to same device as base model
+
+    # Move HyperNetwork to same device and dtype as base model
     if next(base_model.parameters(), None) is not None:
-        device = next(base_model.parameters()).device
-        hypernet = hypernet.to(device)
+        first_param = next(base_model.parameters())
+        device = first_param.device
+        dtype = first_param.dtype
+        hypernet = hypernet.to(device=device, dtype=dtype)
+        print(f"HyperNetwork moved to device={device}, dtype={dtype}")
     
     base_model.hn_lora_hypernet = hypernet
     base_model.hn_lora_layers = lora_layers

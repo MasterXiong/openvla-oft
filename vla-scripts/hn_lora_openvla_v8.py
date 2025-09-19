@@ -104,8 +104,9 @@ class HNLoRALinear(nn.Module):
     
     def set_lora_params(self, lora_A: torch.Tensor, lora_B: torch.Tensor):
         """Set the LoRA parameters for this layer"""
-        self.lora_A = lora_A
-        self.lora_B = lora_B
+        # Ensure LoRA parameters match the original layer's dtype
+        self.lora_A = lora_A.to(dtype=self.weight.dtype)
+        self.lora_B = lora_B.to(dtype=self.weight.dtype)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Original forward
@@ -527,11 +528,14 @@ def apply_hn_lora_to_base_model(base_model, config: HNLoRAConfig):
     
     # Create and attach HyperNetwork
     hypernet = HyperNetwork(config, layer_dims)
-    
-    # Move HyperNetwork to same device as base model
+
+    # Move HyperNetwork to same device and dtype as base model
     if next(base_model.parameters(), None) is not None:
-        device = next(base_model.parameters()).device
-        hypernet = hypernet.to(device)
+        first_param = next(base_model.parameters())
+        device = first_param.device
+        dtype = first_param.dtype
+        hypernet = hypernet.to(device=device, dtype=dtype)
+        print(f"HyperNetwork moved to device={device}, dtype={dtype}")
     
     base_model.hn_lora_hypernet = hypernet
     base_model.hn_lora_layers = lora_layers

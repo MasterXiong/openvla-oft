@@ -30,8 +30,9 @@ class HNLoRALinear(nn.Module):
     
     def set_lora_params(self, lora_A: torch.Tensor, lora_B: torch.Tensor):
         """Set the LoRA parameters for this layer"""
-        self.lora_A = lora_A
-        self.lora_B = lora_B
+        # Ensure LoRA parameters match the original layer's dtype
+        self.lora_A = lora_A.to(dtype=self.weight.dtype)
+        self.lora_B = lora_B.to(dtype=self.weight.dtype)
     
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Original forward
