@@ -6,6 +6,7 @@ Inherits from the default `transformers.PretrainedModel`. Meant to be standalone
 but exactly replicate the logic in `prismatic.models.vlms.prismatic.py`.
 """
 
+import os
 import logging
 from dataclasses import dataclass
 from functools import partial
