@@ -66,6 +66,7 @@ from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 
 from hyperlora.config import HNLoRAConfig
 from hyperlora.add_hn_to_vla import apply_hn_lora_to_base_model
+from experiments.robot.hn_lora_utils import load_hn_lora_checkpoint
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -228,51 +229,6 @@ def load_checkpoint(module_name: str, path: str, step: int, device: str = "cpu")
     print(f"Loading checkpoint: {checkpoint_path}")
     state_dict = torch.load(checkpoint_path, weights_only=True, map_location=device)
     return remove_ddp_in_checkpoint(state_dict)
-
-
-def load_hn_lora_checkpoint(vla, path: str, step: int, device: str = "cpu") -> None:
-    """
-    Loads a HN-LoRA checkpoint and applies it to the VLA model.
-
-    Args:
-        vla: The VLA model with HN-LoRA already initialized.
-        path (str): Path to checkpoint directory.
-        step (int): Gradient step number of saved checkpoint.
-        device (str): String specifying how to remap storage locations (default = "cpu").
-
-    Returns:
-        None.
-    """
-    import json
-    from pathlib import Path
-    
-    checkpoint_dir = Path(path)
-    if step > 0:
-        # For resuming from a specific step
-        hn_lora_dir = checkpoint_dir / f"openvla-7b+libero_spatial_no_noops+b32+lr-0.0005+lora-r8+dropout-0.0--image_aug--hn_lora_v8_grouped_heads_gpu7--{step}_chkpt" / "hn_lora_hypernet"
-    else:
-        # For loading a final checkpoint
-        hn_lora_dir = checkpoint_dir / "hn_lora_hypernet"
-    
-    if not hn_lora_dir.exists():
-        print(f"Warning: HN-LoRA checkpoint directory not found at {hn_lora_dir}")
-        return
-    
-    # Load HyperNetwork state dict
-    hypernet_state_path = hn_lora_dir / "hypernet_state.pt"
-    if hypernet_state_path.exists():
-        print(f"Loading HN-LoRA HyperNetwork from: {hypernet_state_path}")
-        state_dict = torch.load(hypernet_state_path, weights_only=True, map_location=device)
-        
-        # Access the HyperNetwork from the VLA model
-        if hasattr(vla, 'module'):
-            vla.module.hn_lora_hypernet.load_state_dict(state_dict)
-        else:
-            vla.hn_lora_hypernet.load_state_dict(state_dict)
-        
-        print(f"Successfully loaded HN-LoRA HyperNetwork checkpoint")
-    else:
-        print(f"Warning: HyperNetwork state file not found at {hypernet_state_path}")
 
 
 def wrap_ddp(module: nn.Module, device_id: int, find_unused: bool = False) -> DDP:
@@ -995,7 +951,7 @@ def finetune(cfg: FinetuneConfig) -> None:
             vla = apply_hn_lora_to_base_model(vla, hn_config)
             # Load HN-LoRA checkpoint if resuming
             if cfg.resume:
-                load_hn_lora_checkpoint(vla, cfg.vla_path, cfg.resume_step, device=device_id)
+                load_hn_lora_checkpoint(vla, cfg.vla_path, device=device_id)
 
             # Print HN-LoRA summary if available
             if hasattr(vla, 'print_hn_lora_summary'):
