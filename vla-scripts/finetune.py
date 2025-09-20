@@ -66,7 +66,7 @@ from prismatic.vla.datasets.rlds.utils.data_utils import save_dataset_statistics
 
 from hyperlora.config import HNLoRAConfig
 from hyperlora.add_hn_to_vla import apply_hn_lora_to_base_model
-from experiments.robot.hn_lora_utils import load_hn_lora_checkpoint
+from experiments.robot.hn_lora_utils import get_hn_lora_vla
 
 # Sane Defaults
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -918,40 +918,50 @@ def finetune(cfg: FinetuneConfig) -> None:
 
     # Load processor and VLA
     processor = AutoProcessor.from_pretrained(cfg.vla_path, trust_remote_code=True)
-    vla = AutoModelForVision2Seq.from_pretrained(
-        cfg.vla_path,
-        torch_dtype=torch.bfloat16,
-        low_cpu_mem_usage=True,
-        trust_remote_code=True,
-    ).to(device_id)
-
-    # Set number of images in VLA input
-    vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
+    if not cfg.use_hn_lora:
+        vla = AutoModelForVision2Seq.from_pretrained(
+            cfg.vla_path,
+            torch_dtype=torch.bfloat16,
+            low_cpu_mem_usage=True,
+            trust_remote_code=True,
+        ).to(device_id)
+        # Set number of images in VLA input
+        vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
+    else:
+        if not cfg.resume:
+            vla = AutoModelForVision2Seq.from_pretrained(
+                "openvla/openvla-7b",
+                torch_dtype=torch.bfloat16,
+                low_cpu_mem_usage=True,
+                trust_remote_code=True,
+            ).to(device_id)
+            vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
 
     # LoRA setup
     if cfg.use_lora:
         if cfg.use_hn_lora:
-            hn_config = HNLoRAConfig(
-                lora_rank=cfg.lora_rank,
-                lora_alpha=cfg.lora_alpha,
-                lora_dropout=cfg.lora_dropout,
-                context_embedding_dim=cfg.hn_context_dim,
-                context_encoder_type=cfg.hn_encoder_type,
-                context_encoder_layers=cfg.hn_encoder_layers,
-                context_encoder_heads=cfg.hn_encoder_heads,
-                mlp_hidden_dim=cfg.hn_mlp_dim,
-                embedding_dropout=cfg.hn_embedding_dropout,
-            )
-            # Auto-detect model dimensions
-            if hasattr(vla, 'config'):
-                hn_config.hidden_size = getattr(vla.config, 'hidden_size', 
-                                                getattr(vla.config, 'd_model', 768))
-                hn_config.num_hidden_layers = getattr(vla.config, 'num_hidden_layers',
-                                                        getattr(vla.config, 'num_layers', 12))
-            vla = apply_hn_lora_to_base_model(vla, hn_config)
-            # Load HN-LoRA checkpoint if resuming
             if cfg.resume:
-                load_hn_lora_checkpoint(vla, cfg.vla_path, device=device_id)
+                vla = get_hn_lora_vla(cfg)
+                vla.train()
+            else:
+                hn_config = HNLoRAConfig(
+                    lora_rank=cfg.lora_rank,
+                    lora_alpha=cfg.lora_alpha,
+                    lora_dropout=cfg.lora_dropout,
+                    context_embedding_dim=cfg.hn_context_dim,
+                    context_encoder_type=cfg.hn_encoder_type,
+                    context_encoder_layers=cfg.hn_encoder_layers,
+                    context_encoder_heads=cfg.hn_encoder_heads,
+                    mlp_hidden_dim=cfg.hn_mlp_dim,
+                    embedding_dropout=cfg.hn_embedding_dropout,
+                )
+                # Auto-detect model dimensions
+                if hasattr(vla, 'config'):
+                    hn_config.hidden_size = getattr(vla.config, 'hidden_size', 
+                                                    getattr(vla.config, 'd_model', 768))
+                    hn_config.num_hidden_layers = getattr(vla.config, 'num_hidden_layers',
+                                                            getattr(vla.config, 'num_layers', 12))
+                vla = apply_hn_lora_to_base_model(vla, hn_config)
 
             # Print HN-LoRA summary if available
             if hasattr(vla, 'print_hn_lora_summary'):

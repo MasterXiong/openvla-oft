@@ -64,6 +64,11 @@ def load_hn_lora_checkpoint(vla, path: str, device: str = "cpu") -> None:
 
 def get_hn_lora_vla(cfg):
 
+    try:
+        file_path = cfg.pretrained_checkpoint
+    except:
+        file_path = cfg.vla_path
+
     pretrained_vla_path = "openvla/openvla-7b"
 
     if model_is_on_hf_hub(pretrained_vla_path):
@@ -94,7 +99,7 @@ def get_hn_lora_vla(cfg):
     # Set number of images in VLA input
     vla.vision_backbone.set_num_images_in_input(cfg.num_images_in_input)
 
-    with open(f"{cfg.pretrained_checkpoint}/hn_lora_adapter/hn_lora_config.json", "r") as f:
+    with open(f"{file_path}/hn_lora_adapter/hn_lora_config.json", "r") as f:
         hn_config = json.load(f)
 
     hn_config = HNLoRAConfig(
@@ -116,9 +121,9 @@ def get_hn_lora_vla(cfg):
                                                 getattr(vla.config, 'num_layers', 12))
     vla = apply_hn_lora_to_base_model(vla, hn_config, processor=processor)
     
-    load_hn_lora_checkpoint(vla, cfg.pretrained_checkpoint)
+    load_hn_lora_checkpoint(vla, file_path)
 
-    _load_dataset_stats(vla, cfg.pretrained_checkpoint)
+    _load_dataset_stats(vla, file_path)
     vla.eval()
 
     return vla
