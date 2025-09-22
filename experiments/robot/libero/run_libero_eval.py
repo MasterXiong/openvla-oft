@@ -21,8 +21,9 @@ from libero.libero import benchmark
 
 import wandb
 
-# Append current directory so that interpreter can find experiments.robot
-sys.path.append("../..")
+# Append project root directory so that interpreter can find experiments.robot
+import os
+sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))))
 from experiments.robot.libero.libero_utils import (
     get_libero_dummy_action,
     get_libero_env,
@@ -149,8 +150,21 @@ def validate_config(cfg: GenerateConfig) -> None:
 
 def initialize_model(cfg: GenerateConfig):
     """Initialize model and associated components."""
-    # Load model
-    model = get_model(cfg)
+    # Load model and processor
+    if cfg.model_family == "openvla" and cfg.use_hn_lora:
+        # Special handling for HN-LoRA models which return both model and processor
+        from experiments.robot.hn_lora_utils import get_hn_lora_vla
+        model, processor = get_hn_lora_vla(cfg)
+    else:
+        # Load model normally
+        model = get_model(cfg)
+        processor = None
+        if cfg.model_family == "openvla":
+            processor = get_processor(cfg)
+    
+    # Check unnorm key for OpenVLA
+    if cfg.model_family == "openvla":
+        check_unnorm_key(cfg, model)
 
     # Load proprio projector if needed
     proprio_projector = None
@@ -170,12 +184,6 @@ def initialize_model(cfg: GenerateConfig):
     noisy_action_projector = None
     if cfg.use_diffusion:
         noisy_action_projector = get_noisy_action_projector(cfg, model.llm_dim)
-
-    # Get OpenVLA processor if needed
-    processor = None
-    if cfg.model_family == "openvla":
-        processor = get_processor(cfg)
-        check_unnorm_key(cfg, model)
 
     return model, action_head, proprio_projector, noisy_action_projector, processor
 

@@ -126,4 +126,4 @@ def get_hn_lora_vla(cfg):
     _load_dataset_stats(vla, file_path)
     vla.eval()
 
-    return vla
+    return vla, processor
