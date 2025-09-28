@@ -822,7 +822,11 @@ def finetune(cfg: FinetuneConfig) -> None:
     if distributed_state.is_main_process:
         # TODO: enter your wandb key here
         wandb.login(key="")
-        wandb.init(project=cfg.wandb_project, name=f"ft+{run_id}")
+        wandb.init(
+            entity=cfg.wandb_entity,
+            project=cfg.wandb_project, 
+            name=f"ft+{run_id}"
+        )
 
     # Print detected constants
     print(
