@@ -8,11 +8,12 @@ import json
 import logging
 import os
 import sys
+import re
 from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Union, List
 
 import draccus
 import numpy as np
@@ -106,6 +107,9 @@ class GenerateConfig:
     load_in_8bit: bool = False                       # (For OpenVLA only) Load with 8-bit quantization
     load_in_4bit: bool = False                       # (For OpenVLA only) Load with 4-bit quantization
 
+    # Multiple checkpoints evaluation
+    multiple_ckpts: bool = False                     # If True, treat `pretrained_checkpoint` as a directory containing multiple checkpoint subdirectories and evaluate each
+
     #################################################################################################################
     # LIBERO environment-specific parameters
     #################################################################################################################
@@ -134,13 +138,20 @@ def validate_config(cfg: GenerateConfig) -> None:
     """Validate configuration parameters."""
     assert cfg.pretrained_checkpoint is not None, "pretrained_checkpoint must not be None!"
 
-    if "image_aug" in str(cfg.pretrained_checkpoint):
-        assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
+    # If evaluating a single checkpoint, run strict checks now. For multi-ckpt, defer image_aug check per-ckpt.
+    if not cfg.multiple_ckpts:
+        if "image_aug" in str(cfg.pretrained_checkpoint):
+            assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
 
     assert not (cfg.load_in_8bit and cfg.load_in_4bit), "Cannot use both 8-bit and 4-bit quantization!"
 
     # Validate task suite
     assert cfg.task_suite_name in [suite.value for suite in TaskSuite], f"Invalid task suite: {cfg.task_suite_name}"
+
+    # For multi-ckpt mode, ensure the provided path exists (directory or a checkpoint inside a directory)
+    if cfg.multiple_ckpts:
+        path_str = str(cfg.pretrained_checkpoint)
+        assert os.path.exists(path_str), f"Path does not exist: {path_str}"
 
 
 def initialize_model(cfg: GenerateConfig):
@@ -176,6 +187,111 @@ def initialize_model(cfg: GenerateConfig):
     return model, action_head, proprio_projector, noisy_action_projector, processor
 
 
+def _extract_step_from_name(name: str) -> int:
+    """Extract numeric step from a checkpoint directory name; returns -1 if not found."""
+    m = re.search(r"--(\d+)_chkpt$", name)
+    return int(m.group(1)) if m else -1
+
+
+def _collect_ckpt_dirs(base_path: Union[str, Path]) -> List[Path]:
+    """Collect and sort checkpoint directories under a base path.
+
+    Rules:
+    - Accept directories whose names end with `_chkpt` and optionally contain a numeric step like `--50000_chkpt`.
+    - Ignore any entries not matching the pattern (e.g., the training run root without `_chkpt`).
+    - If `base_path` itself points to a single checkpoint directory, evaluate all sibling checkpoints in its parent.
+    - Sorted ascending by numeric step when available; otherwise lexicographically.
+    """
+    p = Path(base_path)
+    if p.is_dir() and p.name.endswith("_chkpt"):
+        root = p.parent
+    elif p.is_dir():
+        root = p
+    else:
+        root = p.parent
+
+    if not root.exists():
+        return []
+
+    candidates = []
+    for child in root.iterdir():
+        if child.is_dir() and child.name.endswith("_chkpt"):
+            candidates.append(child)
+
+    # Sort: first by extracted step (if present; -1 goes first), then by name
+    candidates.sort(key=lambda x: (_extract_step_from_name(x.name), x.name))
+    return candidates
+
+
+def _perform_single_eval(cfg: GenerateConfig) -> float:
+    """Run the full evaluation loop for the checkpoint specified in cfg.pretrained_checkpoint."""
+    # Re-run strict validation for single checkpoint constraints (e.g., image_aug check)
+    if "image_aug" in str(cfg.pretrained_checkpoint):
+        assert cfg.center_crop, "Expecting `center_crop==True` because model was trained with image augmentations!"
+
+    # Set random seed
+    set_seed_everywhere(cfg.seed)
+
+    # Initialize model and components
+    model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
+
+    # Get expected image dimensions
+    resize_size = get_image_resize_size(cfg)
+
+    # Setup logging
+    log_file, local_log_filepath, run_id = setup_logging(cfg)
+
+    # Initialize LIBERO task suite
+    benchmark_dict = benchmark.get_benchmark_dict()
+    task_suite = benchmark_dict[cfg.task_suite_name]()
+    num_tasks = task_suite.n_tasks
+
+    log_message(f"Task suite: {cfg.task_suite_name}", log_file)
+
+    # Start evaluation
+    total_episodes, total_successes = 0, 0
+    for task_id in tqdm.tqdm(range(num_tasks)):
+        total_episodes, total_successes = run_task(
+            cfg,
+            task_suite,
+            task_id,
+            model,
+            resize_size,
+            processor,
+            action_head,
+            proprio_projector,
+            noisy_action_projector,
+            total_episodes,
+            total_successes,
+            log_file,
+        )
+
+    # Calculate final success rate
+    final_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0
+
+    # Log final results
+    log_message("Final results:", log_file)
+    log_message(f"Total episodes: {total_episodes}", log_file)
+    log_message(f"Total successes: {total_successes}", log_file)
+    log_message(f"Overall success rate: {final_success_rate:.4f} ({final_success_rate * 100:.1f}%)", log_file)
+
+    # Log to wandb if enabled
+    if cfg.use_wandb:
+        wandb.log(
+            {
+                "success_rate/total": final_success_rate,
+                "num_episodes/total": total_episodes,
+            }
+        )
+        wandb.save(local_log_filepath)
+
+    # Close log file
+    if log_file:
+        log_file.close()
+
+    return final_success_rate
+
+
 def check_unnorm_key(cfg: GenerateConfig, model) -> None:
     """Check that the model contains the action un-normalization key."""
     # Initialize unnorm_key
@@ -195,7 +311,7 @@ def check_unnorm_key(cfg: GenerateConfig, model) -> None:
 def setup_logging(cfg: GenerateConfig):
     """Set up logging to file and optionally to wandb."""
     # Create run ID
-    run_id = f"EVAL-{cfg.task_suite_name}-{cfg.model_family}-{DATE_TIME}"
+    run_id = f"EVAL-{cfg.pretrained_checkpoint.split('/')[-1]}-{cfg.task_suite_name}"
     if cfg.run_id_note is not None:
         run_id += f"--{cfg.run_id_note}"
 
@@ -460,71 +576,53 @@ def run_task(
 
 @draccus.wrap()
 def eval_libero(cfg: GenerateConfig) -> float:
-    """Main function to evaluate a trained policy on LIBERO benchmark tasks."""
-    # Validate configuration
+    """Main function to evaluate a trained policy on LIBERO benchmark tasks.
+
+    When cfg.multiple_ckpts is True, this will evaluate all checkpoint directories under the provided path
+    (or under the parent directory if a single checkpoint path was provided), and return the best success rate.
+    """
+    # Validate configuration (basic checks)
     validate_config(cfg)
 
-    # Set random seed
-    set_seed_everywhere(cfg.seed)
+    if not cfg.multiple_ckpts:
+        # Single checkpoint evaluation
+        return _perform_single_eval(cfg)
 
-    # Initialize model and components
-    model, action_head, proprio_projector, noisy_action_projector, processor = initialize_model(cfg)
-
-    # Get expected image dimensions
-    resize_size = get_image_resize_size(cfg)
-
-    # Setup logging
-    log_file, local_log_filepath, run_id = setup_logging(cfg)
-
-    # Initialize LIBERO task suite
-    benchmark_dict = benchmark.get_benchmark_dict()
-    task_suite = benchmark_dict[cfg.task_suite_name]()
-    num_tasks = task_suite.n_tasks
-
-    log_message(f"Task suite: {cfg.task_suite_name}", log_file)
-
-    # Start evaluation
-    total_episodes, total_successes = 0, 0
-    for task_id in tqdm.tqdm(range(num_tasks)):
-        total_episodes, total_successes = run_task(
-            cfg,
-            task_suite,
-            task_id,
-            model,
-            resize_size,
-            processor,
-            action_head,
-            proprio_projector,
-            noisy_action_projector,
-            total_episodes,
-            total_successes,
-            log_file,
+    # Multi-checkpoint evaluation
+    ckpt_dirs = _collect_ckpt_dirs(cfg.pretrained_checkpoint)
+    if len(ckpt_dirs) == 0:
+        logger.warning(
+            f"No checkpoint directories found under '{cfg.pretrained_checkpoint}'. "
+            "Ensure the path is a directory containing subdirectories ending with '_chkpt'."
         )
+        return 0.0
 
-    # Calculate final success rate
-    final_success_rate = float(total_successes) / float(total_episodes) if total_episodes > 0 else 0
+    log_message(
+        f"Found {len(ckpt_dirs)} checkpoints for evaluation: " + ", ".join(d.name for d in ckpt_dirs)
+    )
 
-    # Log final results
-    log_message("Final results:", log_file)
-    log_message(f"Total episodes: {total_episodes}", log_file)
-    log_message(f"Total successes: {total_successes}", log_file)
-    log_message(f"Overall success rate: {final_success_rate:.4f} ({final_success_rate * 100:.1f}%)", log_file)
+    best_rate = -1.0
+    summary = []
+    for ckpt in ckpt_dirs:
+        # Temporarily set the checkpoint and run evaluation
+        original_ckpt = cfg.pretrained_checkpoint
+        cfg.pretrained_checkpoint = str(ckpt)
+        try:
+            rate = _perform_single_eval(cfg)
+            summary.append((ckpt.name, rate))
+            if rate > best_rate:
+                best_rate = rate
+        finally:
+            cfg.pretrained_checkpoint = original_ckpt
 
-    # Log to wandb if enabled
-    if cfg.use_wandb:
-        wandb.log(
-            {
-                "success_rate/total": final_success_rate,
-                "num_episodes/total": total_episodes,
-            }
-        )
-        wandb.save(local_log_filepath)
+    # Print a compact summary
+    log_lines = ["\nMulti-ckpt summary (ckpt -> success_rate):"]
+    for name, rate in summary:
+        log_lines.append(f"- {name}: {rate:.4f} ({rate * 100:.1f}%)")
+    log_message("\n".join(log_lines))
 
-    # Close log file
-    if log_file:
-        log_file.close()
-
-    return final_success_rate
+    # Return best success rate across checkpoints
+    return best_rate if best_rate >= 0 else 0.0
 
 
 if __name__ == "__main__":
